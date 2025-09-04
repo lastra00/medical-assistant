@@ -1,8 +1,17 @@
 import os
+import sys
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.chat_message_histories import RedisChatMessageHistory
+
+# Asegurar que el repo root esté en sys.path para import absoluto en Streamlit Cloud
+try:
+    REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+except Exception:
+    pass
 
 from med_agent.graph import build_graph
 
