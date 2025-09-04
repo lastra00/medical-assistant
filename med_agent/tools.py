@@ -40,38 +40,12 @@ def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 
                 time.sleep(0.8)
                 continue
             resp.raise_for_status()
-            # Algunos endpoints MINSAL/proxys devuelven JSON con BOM, text/plain o incluso HTML
-            ctype = resp.headers.get("Content-Type", "").lower()
-            txt = resp.text or ""
-            txt = txt.lstrip("\ufeff\n\r ")
-            # 1) Intento directo
+            # Algunos endpoints MINSAL devuelven JSON con BOM o text/plain
             try:
                 return resp.json()
-            except Exception:
-                pass
-            # 2) Si parece JSON en texto (empieza con { o [)
-            if txt.strip().startswith("{") or txt.strip().startswith("["):
-                try:
-                    return json.loads(txt)
-                except Exception:
-                    pass
-            # 3) Heurística: extraer primer bloque JSON
-            try:
-                start = txt.find("[")
-                end = txt.rfind("]")
-                if 0 <= start < end:
-                    return json.loads(txt[start:end+1])
-            except Exception:
-                pass
-            try:
-                start = txt.find("{")
-                end = txt.rfind("}")
-                if 0 <= start < end:
-                    return json.loads(txt[start:end+1])
-            except Exception:
-                pass
-            # 4) Si no hay forma de parsear, devolver estructura vacía en lugar de excepción
-            return {"data": []}
+            except ValueError:
+                txt = (resp.text or "").lstrip("\ufeff\n\r ")
+                return json.loads(txt)
         except Exception as e:
             last_exc = e
             time.sleep(0.2)
