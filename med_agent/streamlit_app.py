@@ -4,25 +4,46 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 
-from .graph import build_graph
+from med_agent.graph import build_graph
 
 
 def get_env():
-    # Cargar .env desde raíz del repo
+    # 1) Intentar secrets de Streamlit
     try:
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-        dotenv_path = os.path.join(repo_root, ".env")
-        if os.path.exists(dotenv_path):
-            load_dotenv(dotenv_path)
-        else:
-            load_dotenv()
+        if "OPENAI_API_KEY" in st.secrets:
+            os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+        if "openai_api_key" in st.secrets and not os.getenv("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = st.secrets["openai_api_key"]
+        if "REDIS_URL" in st.secrets:
+            os.environ["REDIS_URL"] = st.secrets["REDIS_URL"]
+        if "redis_url" in st.secrets and not os.getenv("REDIS_URL"):
+            os.environ["REDIS_URL"] = st.secrets["redis_url"]
     except Exception:
+        pass
+
+    # 2) Cargar .env desde raíz del repo (intentar 1 nivel y 2 niveles)
+    loaded = False
+    for up in (1, 2):
+        try:
+            base = os.path.dirname(__file__)
+            for _ in range(up):
+                base = os.path.abspath(os.path.join(base, os.pardir))
+            dotenv_path = os.path.join(base, ".env")
+            if os.path.exists(dotenv_path):
+                load_dotenv(dotenv_path)
+                loaded = True
+                break
+        except Exception:
+            continue
+    if not loaded:
         load_dotenv()
-    # alias openai_api_key
+
+    # alias openai_api_key desde .env si procede
     if not os.getenv("OPENAI_API_KEY"):
         alt = os.getenv("openai_api_key") or ""
         if alt:
             os.environ["OPENAI_API_KEY"] = alt
+
     return {
         "REDIS_URL": os.getenv("REDIS_URL") or os.getenv("redis_url") or "redis://localhost:6379/0",
     }
