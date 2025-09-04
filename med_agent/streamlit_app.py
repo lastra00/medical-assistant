@@ -50,7 +50,7 @@ def get_env():
 
 
 @st.cache_resource
-def get_graph():
+def get_graph_cached():
     return build_graph()
 
 
@@ -61,7 +61,9 @@ def main():
 
     env = get_env()
     REDIS_URL = env["REDIS_URL"]
-    graph = get_graph()
+    # Lazy build: solo cuando se envía el primer mensaje
+    if "graph" not in st.session_state:
+        st.session_state.graph = None
 
     if "usuario_actual" not in st.session_state:
         st.session_state.usuario_actual = None
@@ -83,6 +85,9 @@ def main():
 
         st.divider()
         st.caption(f"Redis: {REDIS_URL}")
+        # Salud rápida
+        has_openai = bool(os.getenv("OPENAI_API_KEY"))
+        st.caption(f"OPENAI_API_KEY: {'OK' if has_openai else 'FALTA'}")
 
     # Chat UI
     if "chat_log" not in st.session_state:
@@ -116,11 +121,15 @@ def main():
 
     # Persistencia en Redis manual (idéntico a CLI actualizado)
     try:
+        # Construir el grafo si aún no está
+        if st.session_state.graph is None:
+            with st.spinner("Inicializando modelo..."):
+                st.session_state.graph = get_graph_cached()
         sid = f"usuario_{st.session_state.usuario_actual.lower()}"
         history = RedisChatMessageHistory(session_id=sid, url=REDIS_URL)
         msgs_in = list(history.messages)
         msgs_in.append(HumanMessage(content=prompt))
-        result = graph.invoke({"messages": msgs_in})
+        result = st.session_state.graph.invoke({"messages": msgs_in})
         out_messages = result.get("messages", [])
         last_ai = None
         for m in reversed(out_messages):
