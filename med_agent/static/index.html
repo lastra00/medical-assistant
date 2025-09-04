@@ -71,20 +71,14 @@
     }
 
     async function invokeChat(message) {
-      const body = {
-        input: { messages: [{ type: 'human', content: message }] },
-        // LangServe espera config -> configurable -> session_id
-        config: { configurable: { session_id: `usuario_${(usuario.value || sessionId).toLowerCase()}` } }
-      };
-      const res = await fetch('/chat/invoke', {
+      // Nuevo endpoint que detecta usuario + crea session_id y llama al grafo
+      const body = { message, current_user: (usuario.value || sessionId) };
+      const res = await fetch('/ui/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(t);
-      }
+      if (!res.ok) throw new Error(await res.text());
       return await res.json();
     }
 
@@ -131,8 +125,11 @@
       append('user', text);
       invokeChat(text)
         .then(data => {
-          const textOut = extractTextFromInvokeResponse(data);
-          append('bot', textOut || '(sin respuesta)');
+          if (data?.usuario_actual) {
+            sessionId = data.usuario_actual;
+            usuario.value = data.usuario_actual;
+          }
+          append('bot', (data?.text || '').trim() || '(sin respuesta)');
         })
         .catch(e => append('bot', `Error: ${e.message}`));
     };

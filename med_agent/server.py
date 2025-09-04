@@ -13,6 +13,9 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 from fastapi.staticfiles import StaticFiles
 import os
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage
 
 # Cargar .env ANTES de importar el grafo (para QDRANT_URL/API_KEY, etc.)
 load_dotenv()
@@ -30,6 +33,22 @@ def create_app() -> FastAPI:
         input_messages_key="messages",
         history_messages_key="messages",
     )
+
+    # ============ Detección de usuario (como en chat_multi_usuario) ============
+    class DeteccionUsuario(BaseModel):
+        usuario_identificado: bool
+        nombre_usuario: Optional[str] = None
+        tipo_identificacion: Optional[str] = None
+
+    detector_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(DeteccionUsuario)
+    detector_prompt = ChatPromptTemplate.from_template(
+        """
+        Analiza este mensaje y determina si el usuario se está identificando con su nombre.
+        Devuelve JSON. Ejemplos: "Soy Pablo", "Me llamo Ana", "Hola, aquí Juan otra vez".
+        Mensaje: "{mensaje}"
+        """
+    )
+    detector_chain = detector_prompt | detector_llm
 
     class SessionConfig(BaseModel):
         session_id: str = Field(default="anon", description="ID de sesión para historial en Redis")
@@ -169,6 +188,56 @@ def create_app() -> FastAPI:
             return {"status": "ok"}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    # ============ Endpoint UI: detección + sesión + grafo ============
+    class UIChatRequest(BaseModel):
+        message: str
+        current_user: Optional[str] = None
+
+    @app.post("/ui/chat")
+    def ui_chat(req: UIChatRequest) -> Dict[str, Any]:
+        msg = (req.message or "").strip()
+        if not msg:
+            return {"text": "", "usuario_actual": req.current_user, "session_id": f"usuario_{(req.current_user or 'anon').lower()}"}
+
+        # Detectar usuario en cada mensaje
+        detected_user: Optional[str] = None
+        try:
+            det = detector_chain.invoke({"mensaje": msg})
+            if det.usuario_identificado and det.nombre_usuario:
+                detected_user = det.nombre_usuario
+        except Exception:
+            detected_user = None
+
+        usuario = detected_user or (req.current_user or None)
+
+        # Si no hay usuario todavía, responder saludo/identificación sin invocar grafo
+        if not usuario:
+            texto = (
+                "¡Hola! Soy tu asistente informativo sobre farmacias en Chile y sobre medicamentos del vademécum. "
+                "Para poder recordar nuestras conversaciones, dime tu nombre. Ejemplos: 'Soy María' o 'Me llamo Juan'."
+            )
+            return {"text": texto, "usuario_actual": None, "session_id": "usuario_anon"}
+
+        session_id = f"usuario_{usuario.lower()}"
+        try:
+            result = history_graph.invoke(
+                {"messages": [HumanMessage(content=msg)]},
+                config={"configurable": {"session_id": session_id}},
+            )
+            # Extraer último mensaje AI
+            out_msgs = result.get("messages", [])
+            ai_text = ""
+            for m in reversed(out_msgs):
+                t = getattr(m, "type", None) or getattr(m, "_type", None)
+                if str(t).lower() == "ai":
+                    ai_text = m.content
+                    break
+            if not ai_text and out_msgs:
+                ai_text = getattr(out_msgs[-1], "content", "")
+            return {"text": ai_text or "", "usuario_actual": usuario, "session_id": session_id}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
     return app
 
 
