@@ -23,6 +23,9 @@ DEFAULT_HEADERS: Dict[str, str] = {
     "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
     "Origin": "https://midas.minsal.cl",
     "Referer": "https://midas.minsal.cl/",
+    "X-Requested-With": "XMLHttpRequest",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
 }
 
 
@@ -49,13 +52,26 @@ def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 
     raise HttpError(f"HTTP GET error: {last_exc}")
 
 
+def _http_get_with_fallback(primary_url: str, alt_url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        return _http_get(primary_url, params=params)
+    except HttpError:
+        # Intento alternativo (farmanet)
+        return _http_get(alt_url, params=params)
+
+
 def tool_minsal_locales(comuna: Optional[str] = None, region: Optional[str] = None) -> Dict[str, Any]:
     params: Dict[str, Any] = {}
     if comuna:
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
-    return _http_get(MINSAL_GET_LOCALES, params)
+    # Fallback alternativo (farmanet) si el primario devuelve 403 en cloud
+    return _http_get_with_fallback(
+        MINSAL_GET_LOCALES,
+        "https://farmanet.minsal.cl/index.php/ws/getLocales",
+        params,
+    )
 
 
 def tool_minsal_turnos(comuna: Optional[str] = None, region: Optional[str] = None) -> Dict[str, Any]:
@@ -64,6 +80,11 @@ def tool_minsal_turnos(comuna: Optional[str] = None, region: Optional[str] = Non
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
-    return _http_get(MINSAL_GET_TURNOS, params)
+    # Fallback alternativo (farmanet)
+    return _http_get_with_fallback(
+        MINSAL_GET_TURNOS,
+        "https://farmanet.minsal.cl/index.php/ws/getLocalesTurnos",
+        params,
+    )
 
 
