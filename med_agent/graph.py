@@ -278,13 +278,26 @@ def build_graph():
         comuna, region = _extract_location(last)
         if comuna_router:
             comuna = comuna_router
-        # Obtener datos (tolerante a fallos de filtro en servidor)
-        data = tool_minsal_locales(comuna=None, region=None)
+        # Obtener datos: preferir filtrar en servidor si tenemos comuna; fallback a sin filtro
+        try:
+            data = tool_minsal_locales(comuna=comuna or None, region=None)
+        except Exception:
+            data = tool_minsal_locales(comuna=None, region=None)
         if isinstance(data, dict) and "data" in data:
             rows = data["data"]
         else:
             rows = data if isinstance(data, list) else []
-        if comuna:
+        # Fallback local si el servidor devolvió vacío con filtro
+        if comuna and not rows:
+            try:
+                data_nf = tool_minsal_locales(comuna=None, region=None)
+                if isinstance(data_nf, dict) and "data" in data_nf:
+                    rows = data_nf["data"]
+                else:
+                    rows = data_nf if isinstance(data_nf, list) else []
+            except Exception:
+                rows = []
+        if comuna and rows:
             comuna_norm = _normalize(comuna)
             exact = [r for r in rows if _normalize(str(r.get("comuna_nombre", ""))) == comuna_norm]
             if exact:
@@ -361,13 +374,25 @@ def build_graph():
         comuna_router = state.get("comuna")
         if comuna_router:
             comuna = comuna_router
-        # Obtener datos (tolerante a fallos de filtro en servidor)
-        data = tool_minsal_turnos(comuna=None, region=None)
+        # Obtener datos: preferir filtrar en servidor si tenemos comuna; fallback a sin filtro
+        try:
+            data = tool_minsal_turnos(comuna=comuna or None, region=None)
+        except Exception:
+            data = tool_minsal_turnos(comuna=None, region=None)
         if isinstance(data, dict) and "data" in data:
             rows = data["data"]
         else:
             rows = data if isinstance(data, list) else []
-        if comuna:
+        if comuna and not rows:
+            try:
+                data_nf = tool_minsal_turnos(comuna=None, region=None)
+                if isinstance(data_nf, dict) and "data" in data_nf:
+                    rows = data_nf["data"]
+                else:
+                    rows = data_nf if isinstance(data_nf, list) else []
+            except Exception:
+                rows = []
+        if comuna and rows:
             comuna_norm = _normalize(comuna)
             exact = [r for r in rows if _normalize(str(r.get("comuna_nombre", ""))) == comuna_norm]
             if exact:
