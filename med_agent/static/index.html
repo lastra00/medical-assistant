@@ -88,6 +88,26 @@
       return await res.json();
     }
 
+    function extractTextFromInvokeResponse(data) {
+      try {
+        const msgs = (data && data.output && Array.isArray(data.output.messages)) ? data.output.messages
+                    : (Array.isArray(data?.messages) ? data.messages : null);
+        if (msgs && msgs.length) {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i] || {};
+            const t = (m.type || m._type || '').toString().toLowerCase();
+            if (t === 'ai' || t.includes('ai')) return m.content || '';
+          }
+          const last = msgs[msgs.length - 1];
+          return last?.content || '';
+        }
+        if (data && data.output && typeof data.output.content === 'string') return data.output.content;
+        return '';
+      } catch (e) {
+        return '';
+      }
+    }
+
     async function clearHistory() {
       const body = { session_id: `usuario_${(usuario.value || sessionId).toLowerCase()}` };
       const res = await fetch('/history/clear', {
@@ -111,11 +131,8 @@
       append('user', text);
       invokeChat(text)
         .then(data => {
-          const msgs = data.output?.messages || [];
-          // tomar último AI
-          let last = msgs.findLast?.(m => m.type === 'ai');
-          if (!last && msgs.length) last = msgs[msgs.length - 1];
-          append('bot', last?.content || '(sin respuesta)');
+          const textOut = extractTextFromInvokeResponse(data);
+          append('bot', textOut || '(sin respuesta)');
         })
         .catch(e => append('bot', `Error: ${e.message}`));
     };
