@@ -29,6 +29,27 @@ uvicorn final_proyect.med_agent.server:app --host 0.0.0.0 --port 8000 --reload
 4) Probar endpoints
 - Documentación: `http://127.0.0.1:8000/docs`
 - Playground LangServe: `http://127.0.0.1:8000/chat/playground/`
+## 🌐 Despliegue en Fly (UI incluida)
+
+1) Instala y loguéate en flyctl.
+
+2) Desde `final_proyect/` despliega:
+```
+flyctl deploy
+```
+
+3) Revisa estado y URL:
+```
+flyctl status
+```
+
+4) Abre la URL del app de Fly. Te redirige a `/chat/playground/` (UI incluida por LangServe).
+
+5) (Opcional) Configura `MINSAL_PROXY_URL` para que tu app consuma el propio proxy:
+```
+flyctl secrets set MINSAL_PROXY_URL="https://<tu-app>.fly.dev"
+```
+
 - Invocación REST (ojo con el esquema de mensajes):
 ```bash
 curl -X POST http://127.0.0.1:8000/chat/invoke \

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import RedirectResponse, HTMLResponse
 from dotenv import load_dotenv
 from langserve import add_routes
 from langgraph.checkpoint.memory import MemorySaver
@@ -19,8 +20,20 @@ def create_app() -> FastAPI:
     graph = build_graph()
     # Exponer grafo como runnable
     add_routes(app, graph, path="/graph")
-    # Compatibilidad: añadir /chat como alias
+    # Playground de LangServe disponible en /chat/playground
     add_routes(app, graph, path="/chat")
+
+    @app.get("/", response_class=HTMLResponse)
+    def root() -> HTMLResponse:
+        # Redirigir al playground de LangServe del chat
+        return HTMLResponse("""
+        <html>
+          <head><meta http-equiv="refresh" content="0; url=/chat/playground/" /></head>
+          <body>
+            <a href="/chat/playground/">Ir al Playground</a>
+          </body>
+        </html>
+        """)
 
     # Encabezados tipo navegador para evitar 403
     DEFAULT_HEADERS: Dict[str, str] = {
