@@ -8,6 +8,7 @@ import requests
 from .config import (
     MINSAL_GET_LOCALES,
     MINSAL_GET_TURNOS,
+    MINSAL_PROXY_URL,
 )
 
 
@@ -90,6 +91,10 @@ def tool_minsal_locales(comuna: Optional[str] = None, region: Optional[str] = No
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
+    # Si hay proxy definido, úsalo
+    if MINSAL_PROXY_URL:
+        url = f"{MINSAL_PROXY_URL.rstrip('/')}/locales"
+        return _http_get(url, params)
     return _http_get_with_fallback(
         MINSAL_GET_LOCALES,
         "https://farmanet.minsal.cl/index.php/ws/getLocales",
@@ -103,6 +108,9 @@ def tool_minsal_turnos(comuna: Optional[str] = None, region: Optional[str] = Non
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
+    if MINSAL_PROXY_URL:
+        url = f"{MINSAL_PROXY_URL.rstrip('/')}/turnos"
+        return _http_get(url, params)
     return _http_get_with_fallback(
         MINSAL_GET_TURNOS,
         "https://farmanet.minsal.cl/index.php/ws/getLocalesTurnos",

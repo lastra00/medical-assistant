@@ -29,6 +29,9 @@ MINSAL_GET_TURNOS = os.getenv(
     "https://midas.minsal.cl/farmacia_v2/WS/getLocalesTurnos.php",
 )
 
+# Proxy opcional para MINSAL (Fly/Cloudflare/etc.)
+MINSAL_PROXY_URL = os.getenv("MINSAL_PROXY_URL", "")
+
 # Índice local
 INDEX_DIR = os.getenv(
     "INDEX_DIR",
