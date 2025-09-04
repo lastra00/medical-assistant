@@ -151,7 +151,7 @@ def create_app() -> FastAPI:
     def proxy_locales(
         comuna_nombre: Optional[str] = Query(default=None),
         fk_region: Optional[str] = Query(default=None),
-    ) -> Dict[str, Any]:
+    ) -> Any:
         params: Dict[str, Any] = {}
         if comuna_nombre:
             params["comuna_nombre"] = comuna_nombre
@@ -166,7 +166,7 @@ def create_app() -> FastAPI:
     def proxy_turnos(
         comuna_nombre: Optional[str] = Query(default=None),
         fk_region: Optional[str] = Query(default=None),
-    ) -> Dict[str, Any]:
+    ) -> Any:
         params: Dict[str, Any] = {}
         if comuna_nombre:
             params["comuna_nombre"] = comuna_nombre
@@ -221,20 +221,33 @@ def create_app() -> FastAPI:
 
         session_id = f"usuario_{usuario.lower()}"
         try:
-            result = history_graph.invoke(
-                {"messages": [HumanMessage(content=msg)]},
-                config={"configurable": {"session_id": session_id}},
-            )
-            # Extraer último mensaje AI
-            out_msgs = result.get("messages", [])
-            ai_text = ""
-            for m in reversed(out_msgs):
-                t = getattr(m, "type", None) or getattr(m, "_type", None)
-                if str(t).lower() == "ai":
-                    ai_text = m.content
+            # Limitar historial para evitar prompts gigantes (p. ej., sesiones largas compartidas entre CLI y UI)
+            hist_limit = 14
+            try:
+                hist_limit = int(os.getenv("UI_HISTORY_LIMIT", "14"))
+            except Exception:
+                hist_limit = 14
+
+            history = RedisChatMessageHistory(session_id=session_id, url=REDIS_URL)
+            prev = list(history.messages)
+            if hist_limit > 0 and len(prev) > hist_limit:
+                prev = prev[-hist_limit:]
+            msgs_in = prev + [HumanMessage(content=msg)]
+
+            result = graph.invoke({"messages": msgs_in})
+
+            # Persistir manualmente (paridad con CLI/Streamlit):
+            history.add_user_message(msg)
+            out_messages = result.get("messages", [])
+            last_ai = None
+            for m in reversed(out_messages):
+                if getattr(m, "type", "") == "ai":
+                    last_ai = m
                     break
-            if not ai_text and out_msgs:
-                ai_text = getattr(out_msgs[-1], "content", "")
+            if last_ai is None and out_messages:
+                last_ai = out_messages[-1]
+            ai_text = getattr(last_ai, "content", "") if last_ai else "(sin respuesta)"
+            history.add_ai_message(ai_text)
             return {"text": ai_text or "", "usuario_actual": usuario, "session_id": session_id}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
