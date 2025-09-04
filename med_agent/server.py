@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 from langserve import add_routes
 from langgraph.checkpoint.memory import MemorySaver
@@ -8,29 +8,49 @@ import requests
 import json
 import time
 from urllib.parse import urlencode, quote, urlsplit
+from pydantic import BaseModel, Field
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import RedisChatMessageHistory
+from fastapi.staticfiles import StaticFiles
+import os
 
 # Cargar .env ANTES de importar el grafo (para QDRANT_URL/API_KEY, etc.)
 load_dotenv()
 from .graph import build_graph
-from .config import MINSAL_GET_LOCALES, MINSAL_GET_TURNOS
+from .config import MINSAL_GET_LOCALES, MINSAL_GET_TURNOS, REDIS_URL
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Med Agent API")
     graph = build_graph()
+    # Envolver con historial Redis y exponer session_id en Playground
+    history_graph = RunnableWithMessageHistory(
+        graph,
+        lambda session_id: RedisChatMessageHistory(session_id=session_id, url=REDIS_URL),
+        input_messages_key="messages",
+        history_messages_key="messages",
+    )
+
+    class SessionConfig(BaseModel):
+        session_id: str = Field(default="anon", description="ID de sesión para historial en Redis")
     # Exponer grafo como runnable
     add_routes(app, graph, path="/graph")
     # Playground de LangServe disponible en /chat/playground
-    add_routes(app, graph, path="/chat")
+    # Permitir que el playground envíe {"configurable": {"session_id": "..."}}
+    add_routes(app, history_graph, path="/chat", config_keys=["configurable"])  # langserve actual: usar 'configurable'
+
+    # Servir UI estática en /app (si existe carpeta static)
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.isdir(static_dir):
+        app.mount("/app", StaticFiles(directory=static_dir, html=True), name="app")
 
     @app.get("/", response_class=HTMLResponse)
     def root() -> HTMLResponse:
-        # Redirigir al playground de LangServe del chat
         return HTMLResponse("""
         <html>
-          <head><meta http-equiv="refresh" content="0; url=/chat/playground/" /></head>
+          <head><meta http-equiv=\"refresh\" content=\"0; url=/app/\" /></head>
           <body>
-            <a href="/chat/playground/">Ir al Playground</a>
+            <a href=\"/app/\">Abrir Chat</a> | <a href=\"/chat/playground/\">Playground</a>
           </body>
         </html>
         """)
@@ -137,6 +157,18 @@ def create_app() -> FastAPI:
             return _proxy_try(MINSAL_GET_TURNOS, "https://farmanet.minsal.cl/index.php/ws/getLocalesTurnos", params)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"upstream error: {e}")
+
+    # Limpieza de historial por session_id
+    class ClearReq(BaseModel):
+        session_id: str
+
+    @app.post("/history/clear")
+    def clear_history(req: ClearReq) -> Dict[str, str]:
+        try:
+            RedisChatMessageHistory(session_id=req.session_id, url=REDIS_URL).clear()
+            return {"status": "ok"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
     return app
 
 
