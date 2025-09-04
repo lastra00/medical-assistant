@@ -1,6 +1,7 @@
 import json
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode, quote, urlsplit
 
 import requests
 
@@ -57,7 +58,30 @@ def _http_get_with_fallback(primary_url: str, alt_url: str, params: Optional[Dic
         return _http_get(primary_url, params=params)
     except HttpError:
         # Intento alternativo (farmanet)
-        return _http_get(alt_url, params=params)
+        try:
+            return _http_get(alt_url, params=params)
+        except HttpError:
+            # Proxys públicos como último recurso (DNS/403 en cloud)
+            full = primary_url
+            if params:
+                qs = urlencode(params)
+                sep = '&' if ('?' in full) else '?'
+                full = f"{full}{sep}{qs}"
+            # 1) allorigins
+            try:
+                wrapped = f"https://api.allorigins.win/raw?url={quote(full, safe='')}"
+                return _http_get(wrapped, params=None)
+            except HttpError:
+                pass
+            # 2) r.jina.ai
+            try:
+                parts = urlsplit(full)
+                pathq = parts.path + (f"?{parts.query}" if parts.query else "")
+                # usar http en path para compatibilidad del proxy
+                wrapped = f"https://r.jina.ai/http://{parts.netloc}{pathq}"
+                return _http_get(wrapped, params=None)
+            except HttpError as e3:
+                raise e3
 
 
 def tool_minsal_locales(comuna: Optional[str] = None, region: Optional[str] = None) -> Dict[str, Any]:
