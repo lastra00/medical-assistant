@@ -116,8 +116,8 @@ flowchart LR
   A["Texto usuario"] --> B["normalizar (lower, sin tildes, sin puntuación)"]
   B --> C{patrones de comuna}
   C -->|match| D["comuna = ..."]
-  B --> E{¿dirección? (números/keywords)}
-  E -->|sí| F["tokenizar dirección"]
+  B --> E{direccion o numeros o keywords}
+  E -->|si| F["tokenizar direccion"]
   F --> G["match tokens en local_direccion"]
 ```
 
