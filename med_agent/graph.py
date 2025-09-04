@@ -23,7 +23,8 @@ def build_graph():
     if OPENAI_API_KEY and not os.getenv("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
     llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
-    retriever = QdrantDrugRetrieval()
+    # Lazy init del retriever para reducir memoria al inicio
+    retriever_ref: Dict[str, Any] = {"obj": None}
 
     # ============================
     # Modelos Pydantic (agentes)
@@ -440,7 +441,9 @@ def build_graph():
                 return w
             variants = list({*aliases, *[_sing(a) for a in aliases]})
             try:
-                names = retriever.list_by_field(field_map[mode], variants[0] if variants else pivot, synonyms=variants[1:])
+                if retriever_ref["obj"] is None:
+                    retriever_ref["obj"] = QdrantDrugRetrieval()
+                names = retriever_ref["obj"].list_by_field(field_map[mode], variants[0] if variants else pivot, synonyms=variants[1:])
             except Exception:
                 names = []
             meds_not_found = len(names) == 0
@@ -457,7 +460,9 @@ def build_graph():
 
         # 3) Modo por nombre (defecto)
         # Si el usuario escribió el fármaco en español, traducimos token objetivo a aliases EN para ampliar recall
-        hits = retriever.search(query, k=12)
+        if retriever_ref["obj"] is None:
+            retriever_ref["obj"] = QdrantDrugRetrieval()
+        hits = retriever_ref["obj"].search(query, k=12)
         # Filtrado enfocado en el fármaco mencionado (tolerante ES→EN vía LLM)
         q_norm = _normalize(query)
         stopwords = {
@@ -488,7 +493,7 @@ def build_graph():
             if not filtered and len(tokens_to_match) > 1:
                 # Reintento: consultar explícitamente por el primer alias EN en Qdrant
                 alias_query = tokens_to_match[1]
-                hits_alias = retriever.search(alias_query, k=5)
+                hits_alias = retriever_ref["obj"].search(alias_query, k=5)
                 filtered = [h for h in hits_alias if _hit_matches_any(h, tokens_to_match[1:])]
             hits = filtered
             if not hits:
@@ -498,7 +503,7 @@ def build_graph():
             m = re.search(r"para\s+que\s+sirve\s+([a-zñ\s]+)", q_norm)
             if m:
                 direct = m.group(1).strip()
-                hits_direct = retriever.search(direct, k=8)
+                hits_direct = retriever_ref["obj"].search(direct, k=8)
                 if hits_direct:
                     hits = hits_direct
                 else:
