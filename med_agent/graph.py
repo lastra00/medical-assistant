@@ -136,6 +136,16 @@ def build_graph():
         s = re.sub(r"\s+", " ", s)
         return s
 
+    def _get_last_human(state: MessagesState) -> str:
+        msgs = state["messages"]
+        for m in reversed(msgs):
+            try:
+                if isinstance(m, HumanMessage) or getattr(m, "type", None) == "human":
+                    return m.content
+            except Exception:
+                continue
+        return msgs[-1].content if msgs else ""
+
     def _extract_location(text: str) -> Tuple[str, str]:
         """Extrae comuna tras 'en ...'; ignora palabras como hoy/ahora y signos finales."""
         text_norm = _normalize(text)
@@ -185,7 +195,7 @@ def build_graph():
 
     def router_node(state: MessagesState):
         # Agente Router (LLM)
-        last_user = state["messages"][-1].content
+        last_user = _get_last_human(state)
         decision: Dict[str, Any] = router_chain.invoke({"input": last_user})
         out: Dict[str, Any] = {"route": decision.get("route")}
         if decision.get("routes"):
@@ -205,7 +215,7 @@ def build_graph():
         return out
 
     def guardrails_node(state: MessagesState):
-        last_user = state["messages"][-1].content
+        last_user = _get_last_human(state)
         nz = _normalize(last_user)
         required = "Lo siento, pero no puedo ofrecer recomendaciones médicas."
         default_tail = "Te sugiero que consultes a un profesional de la salud o revises fuentes oficiales como MINSAL para obtener información precisa."
@@ -262,7 +272,7 @@ def build_graph():
         }
 
     def nodo_farmacias(state: MessagesState):
-        last = state["messages"][-1].content
+        last = _get_last_human(state)
         comuna_router = state.get("comuna")
         addr_mode_router = state.get("address_mode")
         comuna, region = _extract_location(last)
@@ -339,13 +349,13 @@ def build_graph():
                 fallback_from_turnos = True
         preview = json.dumps(rows[:50])[:4000]
         return {
-            "messages": [HumanMessage(content=f"RESULTADOS_FARMACIAS: {preview}")],
+            "messages": [AIMessage(content=f"RESULTADOS_FARMACIAS: {preview}")],
             "farmacias_rows": rows[:50],
             "farmacias_fallback_turnos": fallback_from_turnos,
         }\
 
     def nodo_turnos(state: MessagesState):
-        last = state["messages"][-1].content
+        last = _get_last_human(state)
         comuna, region = _extract_location(last)
         # Filtros del router
         comuna_router = state.get("comuna")
@@ -389,12 +399,12 @@ def build_graph():
                 rows = [r for r in rows if str(r.get(fk_key)) == str(fk_val)]
         preview = json.dumps(rows[:50])[:4000]
         return {
-            "messages": [HumanMessage(content=f"RESULTADOS_TURNOS: {preview}")],
+            "messages": [AIMessage(content=f"RESULTADOS_TURNOS: {preview}")],
             "turnos_rows": rows[:50],
         }\
 
     def nodo_meds(state: MessagesState):
-        query = state["messages"][-1].content
+        query = _get_last_human(state)
         
         # 1) Interpretar intención (LLM)
         try:
@@ -449,7 +459,7 @@ def build_graph():
             meds_not_found = len(names) == 0
             preview = json.dumps({"field": field_map[mode], "target": pivot, "names": names})[:4000]
             return {
-                "messages": [HumanMessage(content=f"RESULTADOS_MEDICAMENTOS: {preview}")],
+                "messages": [AIMessage(content=f"RESULTADOS_MEDICAMENTOS: {preview}")],
                 "meds_results": [],
                 "meds_not_found": meds_not_found,
                 "meds_query": query,
@@ -517,7 +527,7 @@ def build_graph():
         preview = json.dumps({"results": hits})[:4000]
         # Guardamos resultados y flag para formateo final
         return {
-            "messages": [HumanMessage(content=f"RESULTADOS_MEDICAMENTOS: {preview}")],
+            "messages": [AIMessage(content=f"RESULTADOS_MEDICAMENTOS: {preview}")],
             "meds_results": hits,
             "meds_not_found": meds_not_found,
             "meds_query": query,
