@@ -14,7 +14,8 @@ from .config import (
 class HttpError(Exception):
     pass
 
-# Algunos entornos (p. ej., cloud) requieren encabezados tipo navegador para evitar 403
+
+# Encabezados tipo navegador para evitar 403 en entornos cloud
 DEFAULT_HEADERS: Dict[str, str] = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -25,8 +26,6 @@ DEFAULT_HEADERS: Dict[str, str] = {
     "Origin": "https://midas.minsal.cl",
     "Referer": "https://midas.minsal.cl/",
     "X-Requested-With": "XMLHttpRequest",
-    "Sec-Fetch-Site": "same-site",
-    "Sec-Fetch-Mode": "cors",
 }
 
 
@@ -35,12 +34,11 @@ def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 
     for attempt in range(2):
         try:
             resp = requests.get(url, params=params, timeout=timeout, headers=DEFAULT_HEADERS)
-            # Retry simple ante 403 en el primer intento
-            if resp.status_code == 403 and attempt == 0:
+            # Retry simple ante 403/429 en el primer intento
+            if resp.status_code in (403, 429) and attempt == 0:
                 time.sleep(0.8)
                 continue
             resp.raise_for_status()
-            # Algunos endpoints MINSAL devuelven JSON con BOM o text/plain
             try:
                 return resp.json()
             except ValueError:
@@ -62,26 +60,28 @@ def _http_get_with_fallback(primary_url: str, alt_url: str, params: Optional[Dic
             return _http_get(alt_url, params=params)
         except HttpError:
             # Proxys públicos como último recurso (DNS/403 en cloud)
-            full = primary_url
-            if params:
-                qs = urlencode(params)
-                sep = '&' if ('?' in full) else '?'
-                full = f"{full}{sep}{qs}"
-            # 1) allorigins
-            try:
-                wrapped = f"https://api.allorigins.win/raw?url={quote(full, safe='')}"
-                return _http_get(wrapped, params=None)
-            except HttpError:
-                pass
-            # 2) r.jina.ai
-            try:
+            def _proxy_try(url: str) -> Dict[str, Any]:
+                full = url
+                if params:
+                    qs = urlencode(params)
+                    sep = '&' if ('?' in full) else '?'
+                    full = f"{full}{sep}{qs}"
+                # 1) allorigins
+                try:
+                    wrapped = f"https://api.allorigins.win/raw?url={quote(full, safe='')}"
+                    return _http_get(wrapped, params=None)
+                except HttpError:
+                    pass
+                # 2) r.jina.ai
                 parts = urlsplit(full)
                 pathq = parts.path + (f"?{parts.query}" if parts.query else "")
-                # usar http en path para compatibilidad del proxy
                 wrapped = f"https://r.jina.ai/http://{parts.netloc}{pathq}"
                 return _http_get(wrapped, params=None)
-            except HttpError as e3:
-                raise e3
+
+            try:
+                return _proxy_try(primary_url)
+            except HttpError:
+                return _proxy_try(alt_url)
 
 
 def tool_minsal_locales(comuna: Optional[str] = None, region: Optional[str] = None) -> Dict[str, Any]:
@@ -90,7 +90,6 @@ def tool_minsal_locales(comuna: Optional[str] = None, region: Optional[str] = No
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
-    # Fallback alternativo (farmanet) si el primario devuelve 403 en cloud
     return _http_get_with_fallback(
         MINSAL_GET_LOCALES,
         "https://farmanet.minsal.cl/index.php/ws/getLocales",
@@ -104,7 +103,6 @@ def tool_minsal_turnos(comuna: Optional[str] = None, region: Optional[str] = Non
         params["comuna_nombre"] = comuna
     if region:
         params["fk_region"] = region
-    # Fallback alternativo (farmanet)
     return _http_get_with_fallback(
         MINSAL_GET_TURNOS,
         "https://farmanet.minsal.cl/index.php/ws/getLocalesTurnos",
