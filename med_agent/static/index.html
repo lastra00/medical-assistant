@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agente Médico</title>
+  <title>Asistente Farmacéutico</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f5f6fa; }
     header { background: #0E7490; color: #fff; padding: 12px 16px; }
@@ -16,7 +16,7 @@
     #chat { height: 60vh; overflow: auto; padding: 8px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
     .msg { margin: 6px 0; }
     .msg.user { text-align: right; }
-    .bubble { display: inline-block; padding: 8px 10px; border-radius: 12px; max-width: 75%; }
+    .bubble { display: inline-block; padding: 8px 10px; border-radius: 12px; max-width: 75%; white-space: pre-wrap; }
     .user .bubble { background: #DCF2FF; }
     .bot .bubble { background: #EEF2FF; }
     footer { text-align: center; color: #475569; font-size: 12px; margin-top: 12px; }
@@ -24,19 +24,9 @@
 </head>
 <body>
   <header>
-    <strong>🩺 Agente Médico</strong>
+    <strong>🩺 Asistente Farmacéutico</strong>
   </header>
   <main>
-    <div class="panel">
-      <div class="row">
-        <label>Usuario:</label>
-        <input id="usuario" placeholder="Ej: Andres" />
-        <button id="btn-usuario">Cambiar</button>
-        <button id="btn-limpiar" class="secondary">Limpiar historial</button>
-      </div>
-      <small>Consejo: Identifícate también diciendo "soy &lt;tu nombre&gt;".</small>
-    </div>
-
     <div id="chat" class="panel"></div>
 
     <div class="panel row">
@@ -53,11 +43,7 @@
     const chat = document.getElementById('chat');
     const input = document.getElementById('input');
     const send = document.getElementById('send');
-    const usuario = document.getElementById('usuario');
-    const btnUsuario = document.getElementById('btn-usuario');
-    const btnLimpiar = document.getElementById('btn-limpiar');
-
-    let sessionId = 'anon';
+    let usuarioActual = null;
 
     function append(role, text) {
       const div = document.createElement('div');
@@ -71,8 +57,9 @@
     }
 
     async function invokeChat(message) {
-      // Nuevo endpoint que detecta usuario + crea session_id y llama al grafo
-      const body = { message, current_user: (usuario.value || sessionId) };
+      // Endpoint UI: detecta usuario si no está fijado; si ya lo está, lo enviamos
+      const body = { message };
+      if (usuarioActual) body.current_user = usuarioActual;
       const res = await fetch('/ui/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,22 +89,6 @@
       }
     }
 
-    async function clearHistory() {
-      const body = { session_id: `usuario_${(usuario.value || sessionId).toLowerCase()}` };
-      const res = await fetch('/history/clear', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-      });
-      if (!res.ok) throw new Error(await res.text());
-      append('bot', '🗑️ Historial limpiado');
-    }
-
-    btnUsuario.onclick = () => {
-      sessionId = (usuario.value || 'anon');
-      append('bot', `Usuario actual: ${sessionId}`);
-    };
-    btnLimpiar.onclick = () => {
-      clearHistory().catch(e => append('bot', `Error limpiando historial: ${e.message}`));
-    };
     send.onclick = () => {
       const text = input.value.trim();
       if (!text) return;
@@ -125,10 +96,7 @@
       append('user', text);
       invokeChat(text)
         .then(data => {
-          if (data?.usuario_actual) {
-            sessionId = data.usuario_actual;
-            usuario.value = data.usuario_actual;
-          }
+          if (data?.usuario_actual) usuarioActual = data.usuario_actual;
           append('bot', (data?.text || '').trim() || '(sin respuesta)');
         })
         .catch(e => append('bot', `Error: ${e.message}`));
@@ -139,7 +107,7 @@
     });
 
     // Mensaje de bienvenida
-    append('bot', 'Hola, soy tu asistente. Dime "soy &lt;tu nombre&gt;" para identificarte.');
+    append('bot', 'Hola, ¿cómo estás? 😊\nSoy tu asistente farmacéutico y quiero ayudarte a resolver tus dudas sobre farmacias y medicamentos.\nAntes de comenzar, necesito que me digas tu nombre para poder identificarte y mantener tu historial de conversación.');
   </script>
 </body>
 </html>
