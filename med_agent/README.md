@@ -125,11 +125,11 @@ flowchart LR
   C --> D["remove punctuation"]
   D --> E["collapse spaces"]
   E --> F{Pattern?}
-  F -->|"en …"| G["extract comuna"]
-  F -->|"comuna de …"| G
-  F -->|"farmacias de …"| G
-  E --> H{Address? (digits/keywords)}
-  H -->|sí| I["tokenizar dirección"]
+  F -->|"en ..."| G["extract comuna"]
+  F -->|"comuna de ..."| G
+  F -->|"farmacias de ..."| G
+  E --> H{Address? digits or keywords}
+  H -->|si| I["tokenizar direccion"]
   I --> J["match tokens en local_direccion"]
 ```
 
