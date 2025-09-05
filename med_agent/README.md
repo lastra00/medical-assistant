@@ -29,6 +29,7 @@ uvicorn final_proyect.med_agent.server:app --host 0.0.0.0 --port 8000 --reload
 4) Probar endpoints
 - Documentación: `http://127.0.0.1:8000/docs`
 - Playground LangServe: `http://127.0.0.1:8000/chat/playground/`
+
 ## 🌐 Despliegue en Fly (UI incluida)
 
 1) Instala y loguéate en flyctl.
@@ -65,12 +66,14 @@ curl -X POST http://127.0.0.1:8000/chat/invoke \
 graph TD
   A["Cliente (Playground/CLI)"] --> B["FastAPI + LangServe (/chat, /graph)"]
   B --> C["LangGraph Orchestrator"]
-  C --> D["Guardrails Node"]
-  D -- "blocked" --> H["Format (policy reply)"]
-  D -- "ok" --> E["Router"]
+  C --> S["Clasificador de Tópico (in_scope)"]
+  S -- off-topic --> H["Format (respuesta fija fuera de alcance)"]
+  S -- in-scope --> D["Guardrails (dosis/prescripción)"]
+  D -- blocked --> H
+  D -- ok --> E["Router"]
   E -- "turnos" --> F["nodo_turnos → MINSAL getLocalesTurnos.php + filtro local"]
   E -- "farmacias" --> G["nodo_farmacias → MINSAL getLocales.php + filtro local"]
-  E -- "meds" --> I["nodo_meds → DrugRetrieval (FAISS)"]
+  E -- "meds" --> I["nodo_meds → DrugRetrieval (FAISS/Qdrant)"]
   F --> H
   G --> H
   I --> H
@@ -80,7 +83,7 @@ graph TD
 - `server.py`: publica el grafo en `/chat` y `/graph`.
 - `graph.py`: define nodos, aristas y decisiones.
 - `tools.py`: tools HTTP contra MINSAL.
-- `retrieval.py`: índice FAISS sobre `DrugData.csv` con `OpenAIEmbeddings`.
+- `retrieval.py`: índice FAISS/Qdrant sobre `DrugData.csv` con `OpenAIEmbeddings`.
 
 ---
 
@@ -88,8 +91,10 @@ graph TD
 
 ```mermaid
 stateDiagram-v2
-  [*] --> guardrails
-  guardrails --> format: blocked
+  [*] --> in_scope
+  in_scope --> format: off-topic
+  in_scope --> guardrails: in-scope
+  guardrails --> format: blocked (dosis)
   guardrails --> router: ok
   router --> nodo_farmacias: "farmacia(s) / comuna / dirección"
   router --> nodo_turnos: "turno(s)"
@@ -101,21 +106,18 @@ stateDiagram-v2
 ```
 
 ### Nodos clave
-- **guardrails_node**: bloquea solicitudes de prescripción/dosis (p. ej., “qué debo tomar”, “dosificación para…”). Si bloquea, produce respuesta de política.
-- **router_node**: enruta según intención del usuario:
-  - Contiene “turno/turnos” → `nodo_turnos`.
-  - Contiene “farmacia/farmacias/comuna/dirección” → `nodo_farmacias`.
-  - Caso contrario → `nodo_meds`.
-- **nodo_turnos**: llama a `getLocalesTurnos.php`, normaliza y aplica filtro local por comuna (ver más abajo) y entrega un JSON truncado (para no saturar prompts) a `format`.
+- **in_scope**: clasificador que determina si el mensaje es de farmacias/medicamentos (o saludo). Si es off-topic, devuelve respuesta fija sin ofrecer ayudas relacionadas al tema fuera de alcance.
+- **guardrails_node**: bloquea solicitudes de prescripción/dosis. Si bloquea, produce respuesta de política.
+- **router_node**: enruta según intención (`turnos`, `farmacias`, `meds`, `saludo`).
+- **nodo_turnos**: llama a `getLocalesTurnos.php`, normaliza y aplica filtro local por comuna.
 - **nodo_farmacias**: llama a `getLocales.php`, y aplica el mismo pipeline de normalización/filtros (incluye búsqueda por dirección).
-- **nodo_meds**: usa `DrugRetrieval` (FAISS) sobre `DrugData.csv` para obtener top-k medicamentos relevantes.
-- **format_final**: compone prompt de sistema (sin recomendaciones médicas, factual, cita fuente) + mensajes previos (con `RESULTADOS_*`) y genera la respuesta final con `ChatOpenAI`.
+- **nodo_meds**: usa `DrugRetrieval` (FAISS/Qdrant) para obtener top-k relevantes.
+- **format_final**: compone mensaje final factual y, como salvaguarda, si detecta off-topic, responde con el rechazo fijo, garantizando consistencia también en `/chat/invoke`.
 
 ---
 
 ## 🔎 Cómo se extrae y filtra la comuna/dirección
 
-1) Normalización de texto de usuario y campos MINSAL
 ```mermaid
 flowchart LR
   A["Texto usuario"] --> B["lowercase"]
@@ -131,20 +133,6 @@ flowchart LR
   I --> J["match tokens en local_direccion"]
 ```
 
-2) Patrones soportados para comuna
-- `en <comuna> [hoy|ahora|…]`
-- `en la comuna de <comuna>`
-- `farmacia(s) de <comuna>`
-
-3) Filtro local robusto (porque el endpoint a veces no filtra server-side)
-- Match exacto por comuna normalizada.
-- Fallback por coincidencia parcial.
-
-4) Consulta por dirección (ej.: “Libertador Bernardo O’Higgins 779”)
-- Detecta presencia de números o keywords (libertador/ohiggins/avenida/calle…).
-- Tokeniza y normaliza dirección de la consulta.
-- Filtra `local_direccion` que contenga todos los tokens relevantes.
-
 ---
 
 ## 🌐 Cómo consulta a MINSAL y procesa resultados
@@ -152,9 +140,8 @@ flowchart LR
 - Llamadas HTTP (GET) vía `tools.py`:
   - `tool_minsal_locales` → `MINSAL_GET_LOCALES`
   - `tool_minsal_turnos` → `MINSAL_GET_TURNOS`
-- Se parsea la respuesta JSON. Si el servidor no aplica filtro por `comuna`, el agente descarga la lista y aplica el filtrado local (comuna exacta o parcial; dirección si corresponde).
-- El resultado filtrado se adjunta como mensaje `RESULTADOS_FARMACIAS` o `RESULTADOS_TURNOS` (JSON truncado para no exceder tokens).
-- `format_final` resume y cita fuente (MINSAL) sin hacer recomendaciones médicas.
+- Si el servidor no filtra por `comuna`, el agente descarga y filtra localmente (exacto → parcial; dirección si corresponde).
+- El resultado filtrado se adjunta como `RESULTADOS_*` y `format` sintetiza la respuesta factual.
 
 ```mermaid
 sequenceDiagram
@@ -164,11 +151,11 @@ sequenceDiagram
   participant T as Tools/MINSAL
   U->>API: POST /chat/invoke {messages:[{type:"human",content:"Farmacias en Lebu"}]}
   API->>G: invoke(messages)
-  G->>G: guardrails()
+  G->>G: in_scope() → guardrails()
   G->>G: router() → nodo_farmacias
   G->>T: GET getLocales.php (sin filtro server-side)
   T-->>G: lista de locales
-  G->>G: normalizar + extraer comuna + filtrar (exacto → parcial)
+  G->>G: normalizar + extraer comuna + filtrar
   G-->>API: format(LLM) con JSON resumido → respuesta final
 ```
 
@@ -176,10 +163,10 @@ sequenceDiagram
 
 ## 💊 Búsqueda semántica en CSV de medicamentos
 
-- `retrieval.py` crea/carga un índice FAISS en `INDEX_DIR`.
+- `retrieval.py` crea/carga un índice local (FAISS/Qdrant).
 - Embeddings con `OpenAIEmbeddings`.
-- Cada fila del CSV se transforma en un `Document` con `page_content` que combina campos clave (Drug Name, Generic Name, Indications, Side Effects…).
-- `nodo_meds` invoca `retriever.search(query, k=5)` y entrega top-k al nodo `format` para generar una respuesta factual.
+- Cada fila del CSV se transforma en `Document` combinando campos (Drug Name, Class, Indications, etc.).
+- `nodo_meds` invoca `retriever.search(query, k=5~12)` y `format` compone una ficha factual.
 
 ---
 
@@ -213,11 +200,24 @@ curl -s -X POST http://127.0.0.1:8000/chat/invoke \
   -d '{"input":{"messages":[{"type":"human","content":"efectos adversos del ibuprofeno"}]}}'
 ```
 
+- Off-topic (receta) — rechazo fijo
+```bash
+curl -s -X POST http://127.0.0.1:8000/chat/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": {"messages": [{"type":"human","content":"¿me das una receta de lentejas?"}]},
+    "config": {"configurable": {"session_id": "usuario_pruebas"}}
+  }'
+```
+Respuesta: “Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.”
+
 ---
 
-## 🔒 Guardrails (seguridad)
-- Políticas de no respuesta: el agente no entrega recomendaciones médicas ni dosificaciones. Ante ese tipo de preguntas, responde con un mensaje de política y fuentes informativas.
-- Implementado en `guardrails_node` con detección básica de términos prohibidos; se puede endurecer con clasificadores dedicados.
+## 🔒 Política de seguridad y tópico estricto
+
+- Capa 1 (tópico): se acepta solo farmacias/turnos/meds (o saludo). Otros temas responden con el rechazo fijo.
+- Capa 2 (dosis/prescripción): bloquea cualquier dosificación o prescripción con mensaje de política.
+- El `format_final` incluye una salvaguarda para mantener la política incluso si se invoca directamente el runnable (`/chat/invoke`).
 
 ---
 
@@ -244,15 +244,15 @@ uvicorn final_proyect.med_agent.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 - Clave OpenAI: asegúrate de tener `OPENAI_API_KEY` (o `openai_api_key`) cargada.
 - Si MINSAL no filtra por comuna, el agente igual aplica filtrado local en memoria.
+- Si off-topic no responde con el rechazo fijo, revisa que tu `graph.py` incluya `InScopeDecision` y la salvaguarda de `format_final`.
 
 ---
 
 ## 🗺️ Roadmap
-- Memoria conversacional en Redis (historial por usuario).
+- Métricas (latencia, tokens) y evaluación cuantitativa automática.
+- Memoria conversacional en Redis (historial por usuario) enriquecida.
 - Búsqueda por coordenadas (lat/lng + radio).
 - NER geográfico para extraer ubicaciones más robustas.
-- Guardrails con verificación adicional de seguridad.
-- Métricas (latencia, tokens) y evaluación cuantitativa automática.
 
 ---
 

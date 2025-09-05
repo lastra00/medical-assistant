@@ -21,8 +21,10 @@ graph TD
   UI["UI Web (HTML/JS)"] --> API["FastAPI + LangServe (/chat, /graph, /ui/chat)"]
   CLI["CLI (chat_cli.py)"] --> API
   API --> LG["LangGraph (orquestador)"]
-  LG --> GR["Guardrails (bloqueo dosis/prescripción)"]
-  LG --> RT["Router (intención)"]
+  LG --> SC["Clasificador de Tópico (in_scope)"]
+  SC -- "off-topic" --> RS["Respuesta fija fuera de alcance"]
+  SC -- "in-scope" --> GR["Guardrails (bloqueo dosis/prescripción)"]
+  GR --> RT["Router (intención)"]
   RT --> NF["Nodo Farmacias"]
   RT --> NT["Nodo Turnos"]
   RT --> NM["Nodo Medicamentos"]
@@ -81,8 +83,10 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-  [*] --> guardrails
-  guardrails --> format: bloqueado
+  [*] --> in_scope
+  in_scope --> format: off-topic
+  in_scope --> guardrails: in-scope
+  guardrails --> format: bloqueado (dosis)
   guardrails --> router: ok
   router --> nodo_saludo: "saludo"
   router --> nodo_farmacias: "farmacias"
@@ -96,11 +100,20 @@ stateDiagram-v2
 ```
 
 ### 3.1 Guardrails (seguridad)
-Bloquea solicitudes de dosis/indicaciones terapéuticas. Lógica combinada:
+El flujo de seguridad ahora tiene DOS capas complementarias:
 
-- Heurística local: detecta frases como “¿cuánto puedo tomar?”, “dosis”, “posología”, etc.
-- Verificación con un LLM estructurado que devuelve `{blocked, policy_message}`.
-- Mensaje requerido si bloquea: “Lo siento, pero no puedo ofrecer recomendaciones médicas.” + sugerencia breve (consultar profesional o fuentes oficiales).
+1) Clasificador de Tópico (in_scope)
+   - Antes de cualquier otra decisión, se evalúa si el mensaje está dentro del alcance del asistente.
+   - in_scope=true si el mensaje trata de: farmacias en Chile (locales, turnos, MINSAL, dirección/comuna) o información factual sobre medicamentos (vademécum: indicaciones, mecanismo, contraindicaciones, interacciones, advertencias). Los saludos/cortesías breves también se aceptan.
+   - in_scope=false si es cualquier otro tema (clima, recetas, deportes, tecnología, programación, chistes, trámites, etc.).
+   - Si es off-topic, se responde con un mensaje fijo y amable, sin ofrecer ayudas relacionadas al tema fuera de alcance: “Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.”
+   - Implementación: combinación de heurística determinística (palabras clave off-topic) + un clasificador LLM estructurado (Pydantic `InScopeDecision`).
+
+2) Guardrails de dosis/prescripción
+   - Bloquea solicitudes de dosis/indicaciones terapéuticas. Lógica combinada:
+   - Heurística local: detecta frases como “¿cuánto puedo tomar?”, “dosis”, “posología”, etc.
+   - Verificación con un LLM estructurado que devuelve `{blocked, policy_message}`.
+   - Mensaje requerido si bloquea: “Lo siento, pero no puedo ofrecer recomendaciones médicas.” + sugerencia breve (consultar profesional o fuentes oficiales).
 
 ### 3.2 Router (intención + filtros)
 Un LLM estructurado clasifica a una de estas rutas: `saludo`, `farmacias`, `turnos`, `meds` y extrae filtros explícitos cuando existen (p. ej., `comuna`, `direccion`, `funcionamiento_dia`, `fecha`, `fk_region`, `local_nombre`, etc.).
@@ -136,6 +149,8 @@ Compone secciones claras:
 - Farmacias (y Turnos si existen), citando fuente MINSAL
 - Información de medicamentos (descripción breve y bullets: nombre, indicaciones, mecanismo, contraindicaciones, interacciones y advertencias)
 - Nota fija al final: “Ante una emergencia, acude a un hospital.”
+
+Además, incluye una salvaguarda de tópico: si el último mensaje resulta ser off-topic, el formateador devuelve el mismo mensaje fijo de fuera de alcance, garantizando consistencia incluso en invocaciones directas por LangServe (`/chat/invoke`).
 
 ---
 
@@ -236,6 +251,21 @@ curl -s -X POST http://127.0.0.1:8000/chat/invoke \
   }'
 ```
 
+Ejemplo off-topic (receta) — respuesta esperada: rechazo fijo de tópico
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/chat/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": {"messages": [{"type":"human","content":"¿me das una receta de lentejas?"}]},
+    "config": {"configurable": {"session_id": "usuario_pruebas"}}
+  }'
+```
+
+Respuesta esperada (contenido textual):
+
+> Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.
+
 ### 8.2 Chat UI helper (/ui/chat)
 
 ```bash
@@ -243,6 +273,24 @@ curl -s -X POST http://127.0.0.1:8000/ui/chat \
   -H 'Content-Type: application/json' \
   -d '{"message":"hola, aquí Ana"}'
 ```
+
+Más ejemplos de UI:
+
+- Off-topic (clima) con usuario fijado
+```bash
+curl -s -X POST http://127.0.0.1:8000/ui/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"¿cómo va el clima hoy?","current_user":"Ana"}'
+```
+Salida esperada (campo `text`): rechazo fijo de tópico.
+
+- Dosis (ibuprofeno)
+```bash
+curl -s -X POST http://127.0.0.1:8000/ui/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"¿Cuál es la dosis de ibuprofeno para un adulto?","current_user":"Ana"}'
+```
+Salida esperada: mensaje de política de dosis (sin recomendaciones).
 
 ### 8.3 Proxys MINSAL
 
@@ -286,6 +334,10 @@ flyctl deploy -a medical-assistant-proxy
 - `/chat/invoke` devuelve error “Missing keys ['session_id']”: envía `config.configurable.session_id`.
 - `ResponseValidationError` en `/locales`/`/turnos`: ya se retornan objetos `Any` para admitir las formas reales del upstream.
 
+Off-topic devuelve contenido inesperado en `/chat/invoke`:
+- Asegúrate de estar en la rama actual y que `med_agent/graph.py` incluya el clasificador `InScopeDecision` y la salvaguarda en `format_final`.
+- Si personalizaste palabras clave, revisa `off_topic_markers` en `guardrails_node` y en el `format_final`.
+
 ---
 
 ## 11) Ética y seguridad
@@ -308,12 +360,42 @@ final_proyect/
 │   ├── static/
 │   │   └── index.html    # UI de chat
 │   └── chat_cli.py       # Cliente de consola con Redis
+├── med_agent_index/      # Índice FAISS local (si se utiliza)
 ├── drug_dataset/
 │   └── DrugData.csv      # Vademécum local
 ├── fly.toml              # Configuración Fly.io
 ├── Dockerfile            # Imagen de despliegue
 └── requirements.txt
 ```
+
+---
+
+## 13) Política de Tópico Estricto (Resumen)
+
+- El asistente SOLO trata: farmacias (generales y de turno, Chile) e información factual de medicamentos (vademécum local).
+- Saludos y cortesías breves son aceptados.
+- Cualquier otro tema es “fuera de alcance (off-topic)” y responde SIEMPRE con el mensaje fijo de rechazo, sin ofrecer ayudas relacionadas al off-topic.
+- Esto se implementa con un clasificador `in_scope` (heurística + LLM) y una salvaguarda en el formateo final para invocaciones directas.
+
+---
+
+## 14) Referencia rápida: entradas → salidas esperadas
+
+Casos comunes con inputs de ejemplo y la salida esperada (resumen textual):
+
+| Caso | Input ejemplo | Salida esperada |
+|------|---------------|-----------------|
+| Saludo | "hola", "buenos días" | Mensaje de bienvenida del asistente, invitando a pedir info de farmacias o medicamentos |
+| Farmacias (comuna) | "farmacias en Lebu" | Lista de farmacias (nombre, dirección, horario) citando MINSAL |
+| Farmacias de turno | "¿qué farmacia hay de turno hoy en Traiguén?" | Lista de farmacias de turno para la comuna y día correspondiente |
+| Por dirección | "¿cómo se llama la farmacia que queda en Libertador Bernardo O’Higgins 779?" | Local(es) que matchean tokens de dirección |
+| Medicamentos | "efectos adversos del ibuprofeno" | Ficha factual (descripción breve + bullets con nombre, indicaciones, mecanismo, contraindicaciones, interacciones, advertencias) |
+| Dosis/Prescripción | "¿Cuál es la dosis de ibuprofeno para un adulto?" | Mensaje de política: no entrega dosis ni recomendaciones, sugiere consultar a un profesional |
+| Off-topic | "¿me das una receta de lentejas?", "¿cómo va el clima?" | Rechazo fijo: “Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.” |
+
+Notas:
+- El formateo puede agregar “Ante una emergencia, acude a un hospital.” al final cuando corresponda.
+- En casos de off-topic, no se ofrecerán alternativas relacionadas al tema fuera de alcance.
 
 ---
 
