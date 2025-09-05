@@ -34,6 +34,10 @@ def build_graph():
         blocked: bool = Field(description="True si el mensaje solicita prescripción/dosis o una acción médica.")
         policy_message: Optional[str] = Field(default=None, description="Mensaje de política si está bloqueado.")
 
+    class InScopeDecision(BaseModel):
+        in_scope: bool = Field(description="True si el mensaje está dentro del alcance (farmacias/turnos o medicamentos) o es un saludo small talk; False si es off-topic.")
+        reason: Optional[str] = None
+
     class RouterDecision(BaseModel):
         route: Literal["farmacias", "turnos", "meds", "saludo"] = Field(description="Ruta a la que enviar el mensaje.")
         routes: Optional[List[Literal["farmacias", "turnos", "meds", "saludo"]]] = Field(default=None, description="Lista de rutas si hay múltiples intenciones.")
@@ -98,6 +102,25 @@ def build_graph():
     ])
     # Casteo a dict para evitar objetos Pydantic en logs de stream
     router_chain = router_prompt | router_llm | RunnableLambda(lambda m: m.dict())
+
+    # ============================
+    # Clasificador de alcance del tema (in/out of scope)
+    # ============================
+
+    in_scope_llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0).with_structured_output(InScopeDecision)
+    in_scope_prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            "Eres un clasificador que determina si un mensaje está dentro del alcance del asistente.\n"
+            "Marca in_scope=true solo si el mensaje trata sobre: \n"
+            "- Farmacias en Chile (locales, turnos, MINSAL, dirección/comuna), o\n"
+            "- Información factual sobre medicamentos (vademécum: nombre, indicaciones, mecanismo, contraindicaciones, interacciones, advertencias).\n"
+            "También considera in_scope=true para saludos/pequeñas cortesías (hola, buenos días, cómo estás).\n"
+            "Marca in_scope=false si el mensaje trata de cualquier otro tema (clima, recetas, deportes, tecnología, programación, chistes, trámites, etc.).\n"
+            "Devuelve JSON estricto del esquema."
+        )),
+        ("human", "{input}")
+    ])
+    in_scope_chain = in_scope_prompt | in_scope_llm | RunnableLambda(lambda m: m.dict())
 
     # ============================
     # Intérprete LLM de intención (medicamentos)
@@ -217,6 +240,28 @@ def build_graph():
     def guardrails_node(state: MessagesState):
         last_user = _get_last_human(state)
         nz = _normalize(last_user)
+        # 0) Bloqueo por fuera de alcance de tema (complementa guardrails de dosis)
+        off_topic_message = (
+            "Lo siento, pero no puedo proporcionar información sobre ese tema. "
+            "Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte."
+        )
+        # Heurística determinística: palabras clave muy fuera de alcance
+        off_topic_markers = {
+            "clima", "tiempo", "receta", "cocina", "cocinar", "deportes", "futbol", "fútbol",
+            "tecnologia", "tecnología", "programacion", "programación", "chiste", "humor", "turismo",
+            "viaje", "pelicula", "película", "series", "musica", "música", "dolar", "dólar",
+            "bitcoin", "cripto", "trafico", "tráfico", "videojuego", "videojuegos", "juego", "juegos",
+            "clases de yoga", "horoscopo", "horóscopo", "astrologia", "astrología"
+        }
+        if any(tok in nz for tok in off_topic_markers):
+            return {"blocked": True, "policy_message": off_topic_message}
+        try:
+            scope_decision: Dict[str, Any] = in_scope_chain.invoke({"input": last_user})
+            if not bool(scope_decision.get("in_scope", False)):
+                return {"blocked": True, "policy_message": off_topic_message}
+        except Exception:
+            # En caso de fallo del clasificador, no bloquear aquí y permitir heurística/LLM de dosis
+            pass
         required = "Lo siento, pero no puedo ofrecer recomendaciones médicas."
         default_tail = "Te sugiero que consultes a un profesional de la salud o revises fuentes oficiales como MINSAL para obtener información precisa."
         default_policy = f"{required} {default_tail}"
@@ -560,6 +605,25 @@ def build_graph():
 
     def format_final(state: MessagesState):
         # LLM resume respuesta factual y recuerda política. Instrucciones claras para no mezclar listados.
+        # Salvaguarda adicional: si el último mensaje del usuario es off-topic, devolver mensaje fijo.
+        try:
+            last_user_ff = _get_last_human(state)
+        except Exception:
+            last_user_ff = ""
+        nz_ff = _normalize(last_user_ff)
+        off_topic_markers_ff = {
+            "clima", "tiempo", "receta", "cocina", "cocinar", "deportes", "futbol", "fútbol",
+            "tecnologia", "tecnología", "programacion", "programación", "chiste", "humor", "turismo",
+            "viaje", "pelicula", "película", "series", "musica", "música", "dolar", "dólar",
+            "bitcoin", "cripto", "trafico", "tráfico", "videojuego", "videojuegos", "juego", "juegos",
+            "clases de yoga", "horoscopo", "horóscopo", "astrologia", "astrología"
+        }
+        if any(tok in nz_ff for tok in off_topic_markers_ff):
+            off_topic_message = (
+                "Lo siento, pero no puedo proporcionar información sobre ese tema. "
+                "Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte."
+            )
+            return {"messages": [AIMessage(content=off_topic_message)]}
         # Si guardrails bloqueó, devolvemos directamente el mensaje de política (sin invocar al LLM de síntesis)
         if state.get("blocked"):
             pm = state.get("policy_message") or (
