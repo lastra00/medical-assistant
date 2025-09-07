@@ -1,357 +1,52 @@
-# 🩺 Asistente Farmacéutico — Guía Completa
+🩺 Asistente Farmacéutico — Guía Completa y Profunda
 
-Esta aplicación entrega información de farmacias (generales y de turno) del MINSAL y fichas de medicamentos basadas en un vademécum local (CSV) con búsqueda semántica. Incluye:
+Esta aplicación entrega información de farmacias (generales y de turno) del MINSAL y fichas factuales de medicamentos (desde un vademécum CSV) con búsqueda semántica. Está pensada para que, con conocimientos básicos de programación, LangGraph y front/back, puedas entender y explicar en detalle su funcionamiento.
 
-- API y UI web en FastAPI/LangServe
-- Orquestación de la conversación con LangGraph (guardrails → router → tools → formato)
-- Memoria por usuario en Redis
-- Retrieval sobre Qdrant con OpenAI Embeddings
-- Proxys a MINSAL para operación estable en la nube
+Importante: el asistente no entrega recomendaciones médicas ni pautas de dosificación. Sólo brinda información factual. Ante dudas de salud, consulta a un profesional.
 
-Demo (despliegue en Fly): [medical-assistant-proxy.fly.dev](https://medical-assistant-proxy.fly.dev)
-
-> Importante: El asistente no entrega recomendaciones médicas ni pautas de dosificación. Sólo brinda información factual. Ante dudas de salud, consulta a un profesional.
+### Lista de contenidos
+- Arquitectura general (alto nivel) y componentes reales del repo
+- Flujo completo: desde que el usuario abre el front hasta 6 mensajes de conversación
+- El Grafo LangGraph en detalle: nodos, entradas/salidas y condiciones de transición
+- Integración con MINSAL (tools y proxys) y con Qdrant (retrieval semántico)
+- Endpoints de la API y ejemplos de llamadas (UI y LangServe)
+- Variables de entorno y ejecución local
+- Despliegue (Fly.io) y troubleshooting
+- Ejemplos de inputs/outputs esperados para casos comunes y de borde
 
 ---
 
-## 1) Arquitectura general
+## Arquitectura general
 
 ```mermaid
 graph TD
-  UI["UI Web (HTML/JS)"] --> API["FastAPI + LangServe (/chat, /graph, /ui/chat)"]
-  CLI["CLI (chat_cli.py)"] --> API
+  UI["UI Web (HTML/JS) /app/"] --> API["FastAPI + LangServe (/chat, /graph, /ui/chat)"]
+  CLI["CLI (med_agent/chat_cli.py)"] --> API
   API --> LG["LangGraph (orquestador)"]
-  LG --> SC["Clasificador de Tópico (in_scope)"]
-  SC -- "off-topic" --> RS["Respuesta fija fuera de alcance"]
-  SC -- "in-scope" --> GR["Guardrails (bloqueo dosis/prescripción)"]
-  GR --> RT["Router (intención)"]
-  RT --> NF["Nodo Farmacias"]
-  RT --> NT["Nodo Turnos"]
-  RT --> NM["Nodo Medicamentos"]
-  NF --> MINSAL["APIs MINSAL (con proxy)"]
+  LG --> SC["in_scope (clasificador de tópico)"]
+  SC -- "off-topic" --> RS["Mensaje fijo fuera de alcance"]
+  SC -- "in-scope" --> GR["guardrails (bloqueo dosis/prescripción)"]
+  GR --> RT["router (intención + filtros)"]
+  RT --> NF["nodo_farmacias"]
+  RT --> NT["nodo_turnos"]
+  RT --> NM["nodo_meds"]
+  NF --> MINSAL["APIs MINSAL (con proxy/headers)"]
   NT --> MINSAL
   NM --> QDRANT["Qdrant (vector DB)"]
   API -.memoria.-> REDIS["Redis (historial por usuario)"]
 ```
 
-### Componentes
-- `final_proyect/med_agent/server.py`: API FastAPI + LangServe, UI estática, proxys `/locales` y `/turnos`, endpoint de chat `/ui/chat`, salud `/healthz` y limpieza de historial.
-- `final_proyect/med_agent/graph.py`: construcción del grafo LangGraph con nodos y lógica de negocio.
-- `final_proyect/med_agent/tools.py`: llamadas HTTP robustas a MINSAL (encabezados tipo navegador, reintentos y proxys públicos si es necesario).
-- `final_proyect/med_agent/retrieval.py`: indexa `drug_dataset/DrugData.csv` en Qdrant y realiza búsquedas semánticas.
-- `final_proyect/med_agent/static/index.html`: UI mínima de chat.
-- `final_proyect/med_agent/chat_cli.py`: cliente de consola con memoria en Redis y detector de usuario.
+### Componentes (rutas reales)
+- `med_agent/server.py`: FastAPI + LangServe, UI estática `/app/`, proxys `/locales` y `/turnos`, chat UI `/ui/chat`, salud `/healthz`, limpieza de historial `/history/clear` y Playgrounds `/graph` y `/chat`.
+- `med_agent/graph.py`: construcción del grafo LangGraph con nodos y reglas de transición.
+- `med_agent/tools.py`: llamadas HTTP robustas a MINSAL (headers de navegador, reintentos y proxys públicos si falla).
+- `med_agent/retrieval.py`: indexa `drug_dataset/DrugData.csv` en Qdrant y hace retrieval con `OpenAIEmbeddings`.
+- `med_agent/static/index.html`: UI mínima (HTML/JS) que conversa con `/ui/chat` y mantiene `usuario_actual`.
+- `med_agent/chat_cli.py`: CLI con memoria persistente en Redis.
 
----
-
-## 2) Flujo de conversación (paso a paso)
-
-```mermaid
-sequenceDiagram
-  participant U as Usuario (UI/CLI)
-  participant API as FastAPI/LangServe
-  participant G as Grafo (LangGraph)
-  participant T as Tools/MINSAL
-  participant V as Qdrant
-  participant R as Redis
-
-  U->>API: POST /ui/chat {message}
-  API->>API: Detectar usuario (si no está fijado)
-  API->>R: Leer historial (session_id=usuario_<nombre>) [límite configurable]
-  API->>G: invoke({messages: historial + mensaje})
-  G->>G: guardrails() (bloquea dosis/prescripción)
-  G->>G: router() → {farmacias | turnos | meds | saludo}
-  alt farmacias
-    G->>T: GET getLocales.php (o proxy)
-  else turnos
-    G->>T: GET getLocalesTurnos.php (o proxy)
-  else meds
-    G->>V: Retrieval Qdrant (OpenAI Embeddings)
-  end
-  G-->>API: format() (respuesta final)
-  API->>R: Guardar turno de conversación (usuario/AI)
-  API-->>U: Texto final
+Estructura del proyecto
 ```
-
-### Memoria por usuario
-- El `session_id` es `usuario_<nombre>`. La UI/CLI detecta el nombre (“soy Ana”, “hola, aquí Juan”) y fija la sesión.
-- El backend recorta el historial a los últimos N mensajes (por defecto 14) para evitar prompts gigantes. Puedes ajustar con `UI_HISTORY_LIMIT`.
-
----
-
-## 3) El Grafo LangGraph en detalle
-
-```mermaid
-stateDiagram-v2
-  [*] --> in_scope
-  in_scope --> format: off-topic
-  in_scope --> guardrails: in-scope
-  guardrails --> format: bloqueado (dosis)
-  guardrails --> router: ok
-  router --> nodo_saludo: "saludo"
-  router --> nodo_farmacias: "farmacias"
-  router --> nodo_turnos: "turnos"
-  router --> nodo_meds: "meds"
-  nodo_saludo --> format
-  nodo_farmacias --> format
-  nodo_turnos --> format
-  nodo_meds --> format
-  format --> [*]
-```
-
-### 3.1 Guardrails (seguridad)
-El flujo de seguridad ahora tiene DOS capas complementarias:
-
-1) Clasificador de Tópico (in_scope)
-   - Antes de cualquier otra decisión, se evalúa si el mensaje está dentro del alcance del asistente.
-   - in_scope=true si el mensaje trata de: farmacias en Chile (locales, turnos, MINSAL, dirección/comuna) o información factual sobre medicamentos (vademécum: indicaciones, mecanismo, contraindicaciones, interacciones, advertencias). Los saludos/cortesías breves también se aceptan.
-   - in_scope=false si es cualquier otro tema (clima, recetas, deportes, tecnología, programación, chistes, trámites, etc.).
-   - Si es off-topic, se responde con un mensaje fijo y amable, sin ofrecer ayudas relacionadas al tema fuera de alcance: “Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.”
-   - Implementación: combinación de heurística determinística (palabras clave off-topic) + un clasificador LLM estructurado (Pydantic `InScopeDecision`).
-
-2) Guardrails de dosis/prescripción
-   - Bloquea solicitudes de dosis/indicaciones terapéuticas. Lógica combinada:
-   - Heurística local: detecta frases como “¿cuánto puedo tomar?”, “dosis”, “posología”, etc.
-   - Verificación con un LLM estructurado que devuelve `{blocked, policy_message}`.
-   - Mensaje requerido si bloquea: “Lo siento, pero no puedo ofrecer recomendaciones médicas.” + sugerencia breve (consultar profesional o fuentes oficiales).
-
-### 3.2 Router (intención + filtros)
-Un LLM estructurado clasifica a una de estas rutas: `saludo`, `farmacias`, `turnos`, `meds` y extrae filtros explícitos cuando existen (p. ej., `comuna`, `direccion`, `funcionamiento_dia`, `fecha`, `fk_region`, `local_nombre`, etc.).
-
-### 3.3 Nodo Farmacias
-1. Obtiene locales desde MINSAL vía `tool_minsal_locales`.
-2. Si se indicó `comuna` y el upstream no filtra, aplica filtrado local robusto (normalización, match exacto → parcial).
-3. Si la consulta parece contener dirección, tokeniza y filtra `local_direccion` por coincidencia de tokens.
-4. Fallback: si con `comuna` no hay resultados, trae `turnos` y filtra por la misma comuna.
-
-```mermaid
-flowchart LR
-  A["Texto usuario"] --> B["normalizar (lower, sin tildes, sin puntuación)"]
-  B --> C{patrones de comuna}
-  C -->|match| D["comuna = ..."]
-  B --> E{direccion o numeros o keywords}
-  E -->|si| F["tokenizar direccion"]
-  F --> G["match tokens en local_direccion"]
-```
-
-### 3.4 Nodo Turnos
-Similar a Farmacias, pero llamado a `getLocalesTurnos.php` y con filtros extra:
-- `funcionamiento_dia`: si el usuario dice “hoy/ahora” se mapea al día actual.
-- `fecha`: sólo se usa cuando llega explícita (los formatos upstream varían).
-
-### 3.5 Nodo Medicamentos
-Dos modos:
-1) Listas por campo (`list_by_class`, `list_by_indications`, `list_by_mechanism`, `list_by_route`, `list_by_pregnancy_category`). Usa un mini intérprete LLM que decide el modo y un traductor ES→EN para mejorar recall (por ejemplo, “antibióticos” → `antibiotics`). Luego filtra los resultados por metadata en Qdrant.
-2) Por nombre: busca en Qdrant con la consulta y filtra resultados para el fármaco mencionado (tolerante a alias EN). Si no encuentra, intenta directamente el token objetivo.
-
-### 3.6 Formateo final
-Compone secciones claras:
-- Farmacias (y Turnos si existen), citando fuente MINSAL
-- Información de medicamentos (descripción breve y bullets: nombre, indicaciones, mecanismo, contraindicaciones, interacciones y advertencias)
-- Nota fija al final: “Ante una emergencia, acude a un hospital.”
-
-Además, incluye una salvaguarda de tópico: si el último mensaje resulta ser off-topic, el formateador devuelve el mismo mensaje fijo de fuera de alcance, garantizando consistencia incluso en invocaciones directas por LangServe (`/chat/invoke`).
-
----
-
-## 4) Búsqueda semántica y Qdrant
-
-El archivo `drug_dataset/DrugData.csv` se indexa en Qdrant. Cada fila se convierte en un `Document` con:
-
-- `page_content` combinando campos clave (Drug Name, Class, Indications, etc.)
-- `metadata` con campos normalizados para filtrado rápido
-
-Embeddings: `OpenAIEmbeddings` con modelo `text-embedding-3-large` (dimensiones configurables). Si la colección no existe, se crea; si existe, se reutiliza.
-
----
-
-## 5) Integración con MINSAL (tools)
-
-Las funciones `_http_get` y `_http_get_with_fallback` usan encabezados de navegador, reintentos y proxys públicos de último recurso (AllOrigins, r.jina.ai) cuando el upstream falla. Además, puedes enrutar todo tráfico MINSAL vía la propia app en Fly exportando:
-
-- `MINSAL_PROXY_URL=https://medical-assistant-proxy.fly.dev`
-
-La API expone `/locales` y `/turnos` que actúan como proxy estable hacia MINSAL y evitan CORS/403 en la nube.
-
----
-
-## 6) Variables de entorno (resumen)
-
-Mínimas:
-
-- `OPENAI_API_KEY` (acepta alias `openai_api_key`)
-- `REDIS_URL` (en Redis Cloud, usa `rediss://` y puerto TLS; si hay problemas, `?ssl_cert_reqs=none`)
-
-Retrieval/Qdrant:
-
-- `QDRANT_URL` — por ejemplo, tu instancia en Qdrant Cloud
-- `QDRANT_API_KEY`
-- `QDRANT_COLLECTION` (default: `med_agent_drugs`)
-
-MINSAL (opcionales):
-
-- `MINSAL_PROXY_URL` — recomendado en Fly
-- `MINSAL_GET_LOCALES`, `MINSAL_GET_TURNOS` (defaults oficiales)
-
-Otros:
-
-- `UI_HISTORY_LIMIT` — límite de mensajes previos que se envían al LLM en `/ui/chat` (default: 14)
-
----
-
-## 7) Ejecución local
-
-1. Crear entorno y dependencias
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r final_proyect/requirements.txt
-```
-
-2. Exportar variables (ejemplo mínimo)
-
-```bash
-export OPENAI_API_KEY=sk-...
-export REDIS_URL=redis://localhost:6379/0
-export QDRANT_URL=http://localhost:6333
-export QDRANT_API_KEY= # si aplica
-```
-
-3. Levantar API
-
-```bash
-uvicorn final_proyect.med_agent.server:app --host 0.0.0.0 --port 8000 --reload
-```
-
-4. Probar
-
-- UI: [http://127.0.0.1:8000/app/](http://127.0.0.1:8000/app/)
-- Playground LangServe: [http://127.0.0.1:8000/chat/playground/](http://127.0.0.1:8000/chat/playground/)
-
-5. CLI (opcional)
-
-```bash
-python -m final_proyect.med_agent.chat_cli
-```
-
-Comandos del CLI: `usuario [nombre]`, `cambiar [nombre]`, `historial [nombre]`, `limpiar [nombre]`, `estado`, `salir`.
-
----
-
-## 8) Invocaciones por HTTP (ejemplos)
-
-### 8.1 Chat (LangServe runnable)
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/chat/invoke \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "input": {"messages": [{"type":"human","content":"farmacias en Lebu"}]},
-    "config": {"configurable": {"session_id": "usuario_pepito"}}
-  }'
-```
-
-Ejemplo off-topic (receta) — respuesta esperada: rechazo fijo de tópico
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/chat/invoke \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "input": {"messages": [{"type":"human","content":"¿me das una receta de lentejas?"}]},
-    "config": {"configurable": {"session_id": "usuario_pruebas"}}
-  }'
-```
-
-Respuesta esperada (contenido textual):
-
-> Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.
-
-### 8.2 Chat UI helper (/ui/chat)
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/ui/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"hola, aquí Ana"}'
-```
-
-Más ejemplos de UI:
-
-- Off-topic (clima) con usuario fijado
-```bash
-curl -s -X POST http://127.0.0.1:8000/ui/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"¿cómo va el clima hoy?","current_user":"Ana"}'
-```
-Salida esperada (campo `text`): rechazo fijo de tópico.
-
-- Dosis (ibuprofeno)
-```bash
-curl -s -X POST http://127.0.0.1:8000/ui/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"¿Cuál es la dosis de ibuprofeno para un adulto?","current_user":"Ana"}'
-```
-Salida esperada: mensaje de política de dosis (sin recomendaciones).
-
-### 8.3 Proxys MINSAL
-
-```bash
-curl -s 'http://127.0.0.1:8000/turnos?comuna_nombre=Traigu%C3%A9n'
-curl -s 'http://127.0.0.1:8000/locales?comuna_nombre=Traigu%C3%A9n'
-```
-
----
-
-## 9) Despliegue en Fly.io (resumen)
-
-1. Instalar y autenticarse con `flyctl`.
-2. Desde `final_proyect/`, setear secretos (ajusta valores reales):
-
-```bash
-flyctl secrets set -a medical-assistant-proxy \
-  OPENAI_API_KEY="..." \
-  REDIS_URL="rediss://default:PASS@HOST:TLS_PORT?ssl_cert_reqs=none" \
-  QDRANT_URL="https://TU-CLUSTER.qdrant.tech" \
-  QDRANT_API_KEY="..." \
-  MINSAL_PROXY_URL="https://medical-assistant-proxy.fly.dev"
-```
-
-3. Desplegar:
-
-```bash
-flyctl deploy -a medical-assistant-proxy
-```
-
-4. Probar: abre la URL de la app y los proxys `/locales` y `/turnos`.
-
----
-
-## 10) Solución de problemas
-
-- Respuesta vacía / 500 al iniciar chat: revisa `OPENAI_API_KEY`.
-- En la nube MINSAL falla (403/429): usa `MINSAL_PROXY_URL` (los proxys integrados evitan CORS/403).
-- Redis Cloud no conecta: usa `rediss://` y el puerto TLS; si hace falta, `?ssl_cert_reqs=none`.
-- El chat queda “procesando”: puede ser historial enorme. Ajusta `UI_HISTORY_LIMIT` (p. ej., 14) y redeploy.
-- `/chat/invoke` devuelve error “Missing keys ['session_id']”: envía `config.configurable.session_id`.
-- `ResponseValidationError` en `/locales`/`/turnos`: ya se retornan objetos `Any` para admitir las formas reales del upstream.
-
-Off-topic devuelve contenido inesperado en `/chat/invoke`:
-- Asegúrate de estar en la rama actual y que `med_agent/graph.py` incluya el clasificador `InScopeDecision` y la salvaguarda en `format_final`.
-- Si personalizaste palabras clave, revisa `off_topic_markers` en `guardrails_node` y en el `format_final`.
-
----
-
-## 11) Ética y seguridad
-
-- No entrega dosis ni indicaciones personalizadas.
-- Cita fuentes: MINSAL para farmacias; vademécum local para medicamentos.
-- Mensaje final fijo: “Ante una emergencia, acude a un hospital.”
-
----
-
-## 12) Estructura del proyecto
-
-```
-final_proyect/
+medical-assistant/
 ├── med_agent/
 │   ├── server.py         # FastAPI + LangServe + UI + proxys MINSAL
 │   ├── graph.py          # Grafo LangGraph (nodos y flujo)
@@ -360,7 +55,6 @@ final_proyect/
 │   ├── static/
 │   │   └── index.html    # UI de chat
 │   └── chat_cli.py       # Cliente de consola con Redis
-├── med_agent_index/      # Índice FAISS local (si se utiliza)
 ├── drug_dataset/
 │   └── DrugData.csv      # Vademécum local
 ├── fly.toml              # Configuración Fly.io
@@ -370,33 +64,271 @@ final_proyect/
 
 ---
 
-## 13) Política de Tópico Estricto (Resumen)
+## Flujo completo: del front a 6 mensajes
 
-- El asistente SOLO trata: farmacias (generales y de turno, Chile) e información factual de medicamentos (vademécum local).
-- Saludos y cortesías breves son aceptados.
-- Cualquier otro tema es “fuera de alcance (off-topic)” y responde SIEMPRE con el mensaje fijo de rechazo, sin ofrecer ayudas relacionadas al off-topic.
-- Esto se implementa con un clasificador `in_scope` (heurística + LLM) y una salvaguarda en el formateo final para invocaciones directas.
+1) El usuario abre `/app/` (UI estática). La UI muestra un saludo y pide el nombre para identificar la sesión.
+2) El usuario escribe. La UI hace `POST /ui/chat` con `{ message, current_user? }`.
+3) El backend intenta identificar usuario con un LLM ligero. Si el mensaje es sólo un nombre (“Ana”), fija `session_id=usuario_ana` y responde sin invocar el grafo.
+4) Cuando ya hay usuario, el backend:
+   - Lee historial desde Redis (`session_id=usuario_<nombre>`), recorta a `UI_HISTORY_LIMIT` (default 14), compone `messages = historial + mensaje`.
+   - Invoca el grafo LangGraph con `invoke({messages})`.
+   - Persiste manualmente el turno (usuario y AI) en Redis.
+5) El grafo aplica guardrails, enruta a nodos (farmacias/turnos/meds/saludo), obtiene datos (MINSAL/Qdrant), y formatea la respuesta.
+6) La UI muestra el texto, mantiene `usuario_actual` y continúa el ciclo.
+
+Secuencia (6 mensajes)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Usuario (UI)
+  participant API as FastAPI (/ui/chat)
+  participant R as Redis (historial)
+  participant G as Grafo LangGraph
+  participant T as Tools MINSAL
+  participant V as Qdrant
+
+  U->>API: 1) "Hola, soy Ana"
+  API-->>U: Confirmación de usuario (sin invocar grafo)
+
+  U->>API: 2) "farmacias en Lebu"
+  API->>R: Leer historial (usuario_ana)
+  API->>G: invoke({messages})
+  G->>G: in_scope ✓ → guardrails ✓ → router=farmacias
+  G->>T: getLocales (o fallback)
+  G-->>API: format (texto MINSAL)
+  API->>R: Persistir turno
+  API-->>U: Lista de farmacias
+
+  U->>API: 3) "¿y de turno hoy?"
+  API->>R: Leer historial
+  API->>G: invoke
+  G->>G: router=turnos (hoy→día actual)
+  G->>T: getLocalesTurnos
+  G-->>API: format
+  API->>R: Persistir turno
+  API-->>U: Turnos hoy
+
+  U->>API: 4) "efectos adversos del ibuprofeno"
+  API->>R: Historial
+  API->>G: invoke
+  G->>G: router=meds → by_name
+  G->>V: search (Qdrant)
+  G-->>API: format (ficha factual)
+  API->>R: Persistir
+  API-->>U: Ficha ibuprofeno
+
+  U->>API: 5) "¿cada cuánto puedo tomar?"
+  API->>G: invoke
+  G->>G: guardrails → blocked (dosis)
+  G-->>API: policy_message
+  API-->>U: Mensaje de política (sin dosis)
+
+  U->>API: 6) "farmacias en Traiguén por O’Higgins 779"
+  API->>G: invoke
+  G->>G: router=farmacias + address_mode
+  G->>T: getLocales → filtro por comuna + tokens dirección
+  G-->>API: format
+  API-->>U: Resultados por dirección
+```
 
 ---
 
-## 14) Referencia rápida: entradas → salidas esperadas
+## El Grafo LangGraph en detalle
 
-Casos comunes con inputs de ejemplo y la salida esperada (resumen textual):
+```mermaid
+stateDiagram-v2
+  [*] --> guardrails
+  guardrails --> format: blocked (dosis/off-topic)
+  guardrails --> router: ok
+  router --> nodo_saludo: saludo
+  router --> nodo_farmacias: farmacias
+  router --> nodo_turnos: turnos
+  router --> nodo_meds: meds
+  nodo_saludo --> format
+  nodo_farmacias --> format
+  nodo_turnos --> format
+  nodo_meds --> format
+  format --> [*]
+```
 
-| Caso | Input ejemplo | Salida esperada |
-|------|---------------|-----------------|
-| Saludo | "hola", "buenos días" | Mensaje de bienvenida del asistente, invitando a pedir info de farmacias o medicamentos |
-| Farmacias (comuna) | "farmacias en Lebu" | Lista de farmacias (nombre, dirección, horario) citando MINSAL |
-| Farmacias de turno | "¿qué farmacia hay de turno hoy en Traiguén?" | Lista de farmacias de turno para la comuna y día correspondiente |
-| Por dirección | "¿cómo se llama la farmacia que queda en Libertador Bernardo O’Higgins 779?" | Local(es) que matchean tokens de dirección |
-| Medicamentos | "efectos adversos del ibuprofeno" | Ficha factual (descripción breve + bullets con nombre, indicaciones, mecanismo, contraindicaciones, interacciones, advertencias) |
-| Dosis/Prescripción | "¿Cuál es la dosis de ibuprofeno para un adulto?" | Mensaje de política: no entrega dosis ni recomendaciones, sugiere consultar a un profesional |
-| Off-topic | "¿me das una receta de lentejas?", "¿cómo va el clima?" | Rechazo fijo: “Lo siento, pero no puedo proporcionar información sobre ese tema. Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte.” |
-
-Notas:
-- El formateo puede agregar “Ante una emergencia, acude a un hospital.” al final cuando corresponda.
-- En casos de off-topic, no se ofrecerán alternativas relacionadas al tema fuera de alcance.
+- guardrails
+  - in_scope: LLM estructurado. Si off-topic → `blocked=true` con mensaje fijo.
+  - Dosis/prescripción: heurística + LLM. Requiere que `policy_message` comience con “Lo siento, pero no puedo ofrecer recomendaciones médicas.” y añada una breve sugerencia.
+- router
+  - LLM estructurado → `route` en {saludo, farmacias, turnos, meds} y posibles filtros: `comuna`, `direccion`, `funcionamiento_dia`, `fecha`, `fk_region`, `local_nombre`, etc.
+  - `routes` permite ejecutar varias rutas en secuencia (p.ej., farmacias y turnos).
+- nodo_saludo
+  - Devuelve texto de cortesía y encuadre del asistente.
+- nodo_farmacias
+  - Extrae comuna (patrones en español) y detecta modo dirección (número/keywords).
+  - Llama `tool_minsal_locales` con filtro servidor; si vacío, descarga y filtra localmente; si sigue vacío, intenta fallback con `turnos` para la misma comuna.
+  - Filtros adicionales: `localidad`, `local_nombre`, teléfono, `funcionamiento_hora_*`, `fk_*`.
+- nodo_turnos
+  - Similar a farmacias, pero con `getLocalesTurnos`.
+  - Si `funcionamiento_dia` ∈ {hoy, ahora} → mapea al día actual.
+  - `fecha` sólo si viene explícita (formatos upstream varían).
+- nodo_meds
+  - Intérprete de intención: `by_name` vs `list_by_*` (class/indications/mechanism/route/pregnancy).
+  - Traduce tokens ES→EN para mejorar recall en Qdrant y singulariza variantes.
+  - `by_name`: búsqueda + filtrado por token/alias; si no hay hits, intenta “para que sirve X”.
+  - `list_by_*`: construye lista de nombres a partir del payload filtrado.
+- format
+  - Revalida in_scope; si off-topic → mensaje fijo.
+  - Compone secciones: Farmacias, Turnos, Medicamentos (fichas o listas según flags) y cierra con “Ante una emergencia…”.
 
 ---
 
-¿Preguntas o quieres ampliar alguna sección? Puedo agregar ejemplos de prompts, más diagramas o guías específicas de despliegue.
+## Integraciones
+
+### MINSAL (tools)
+- Encabezados tipo navegador, reintentos y proxys públicos (AllOrigins, r.jina.ai) como último recurso.
+- Endpoints propios de proxy: `/locales` y `/turnos` (para nubes con CORS/403).
+
+### Qdrant (retrieval)
+- `drug_dataset/DrugData.csv` → documentos con `page_content` + `metadata` filtrable.
+- Embeddings `text-embedding-3-large` (dimensiones 256 por defecto).
+- Si la colección no existe, se crea; si existe, se reutiliza.
+
+---
+
+## Endpoints y ejemplos
+
+- UI: `/app/`
+- Playground LangServe: `/chat/playground/` y `/graph/playground/`
+- Chat UI helper: `POST /ui/chat { message, current_user? }`
+- Chat (LangServe runnable): `POST /chat/invoke`
+- Proxys MINSAL: `GET /locales`, `GET /turnos`
+- Salud: `GET /healthz`
+- Limpiar historial: `POST /history/clear { session_id }`
+
+Ejemplos
+```bash
+# LangServe runnable con sesión
+curl -s -X POST http://127.0.0.1:8000/chat/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": {"messages": [{"type":"human","content":"farmacias en Lebu"}]},
+    "config": {"configurable": {"session_id": "usuario_ana"}}
+  }'
+
+# UI: fijar usuario
+curl -s -X POST http://127.0.0.1:8000/ui/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Soy Ana"}'
+
+# UI: consulta con usuario fijado
+curl -s -X POST http://127.0.0.1:8000/ui/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"efectos adversos del ibuprofeno","current_user":"Ana"}'
+
+# Proxys MINSAL
+curl -s 'http://127.0.0.1:8000/locales?comuna_nombre=Traigu%C3%A9n'
+curl -s 'http://127.0.0.1:8000/turnos?comuna_nombre=Traigu%C3%A9n'
+```
+
+---
+
+## Variables de entorno
+
+Mínimas
+- `OPENAI_API_KEY` (acepta alias `openai_api_key`)
+- `REDIS_URL` (si es Redis Cloud, usa `rediss://` y el puerto TLS; si hay problemas, `?ssl_cert_reqs=none`)
+
+Retrieval/Qdrant
+- `QDRANT_URL` — p. ej., tu instancia en Qdrant Cloud
+- `QDRANT_API_KEY`
+- `QDRANT_COLLECTION` (default: `med_agent_drugs`)
+
+MINSAL (opcionales)
+- `MINSAL_PROXY_URL` — recomendado en Fly
+- `MINSAL_GET_LOCALES`, `MINSAL_GET_TURNOS` (defaults oficiales)
+
+Otros
+- `UI_HISTORY_LIMIT` — recorte de historial (default: 14)
+
+---
+
+## Ejecución local
+
+1) Crear entorno y dependencias
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r medical-assistant/requirements.txt
+```
+
+2) Exportar variables (ejemplo mínimo)
+```bash
+export OPENAI_API_KEY=sk-...
+export REDIS_URL=redis://localhost:6379/0
+export QDRANT_URL=http://localhost:6333
+export QDRANT_API_KEY= # si aplica
+```
+
+3) Levantar API
+```bash
+uvicorn med_agent.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+4) Probar
+- UI: `http://127.0.0.1:8000/app/`
+- Playground LangServe: `http://127.0.0.1:8000/chat/playground/`
+
+5) CLI (opcional)
+```bash
+python -m med_agent.chat_cli
+```
+
+---
+
+## Despliegue en Fly.io (resumen)
+
+1) Instala y autentícate con `flyctl`.
+2) Desde `medical-assistant/`, setea secretos (valores reales):
+```bash
+flyctl secrets set -a medical-assistant-proxy \
+  OPENAI_API_KEY="..." \
+  REDIS_URL="rediss://default:PASS@HOST:TLS_PORT?ssl_cert_reqs=none" \
+  QDRANT_URL="https://TU-CLUSTER.qdrant.tech" \
+  QDRANT_API_KEY="..." \
+  MINSAL_PROXY_URL="https://medical-assistant-proxy.fly.dev"
+```
+3) Desplegar
+```bash
+flyctl deploy -a medical-assistant-proxy
+```
+4) Probar: abre la URL del app y los proxys `/locales` y `/turnos`.
+
+---
+
+## Troubleshooting
+- Respuesta vacía/500 al iniciar chat: revisa `OPENAI_API_KEY`.
+- MINSAL 403/429 en la nube: usa `MINSAL_PROXY_URL` (proxys integrados evitan CORS/403).
+- Redis Cloud: usa `rediss://` y puerto TLS; si hace falta, `?ssl_cert_reqs=none`.
+- Chat “procesando” por mucho tiempo: historial enorme. Ajusta `UI_HISTORY_LIMIT`.
+- En `/chat/invoke`, si falta `session_id`: envíalo en `config.configurable.session_id`.
+
+---
+
+## Ética y seguridad
+- No se dan dosis ni prescripciones personalizadas.
+- Se citan fuentes: MINSAL (farmacias) y vademécum local (medicamentos).
+- Se añade el recordatorio: “Ante una emergencia, acude a un hospital.”
+
+---
+
+## Referencia rápida: entradas → salidas esperadas
+
+| Caso | Input | Salida esperada |
+|------|-------|-----------------|
+| Saludo/identificación | "Soy Ana" | Confirma usuario y pide consulta |
+| Farmacias (comuna) | "farmacias en Lebu" | Lista con nombre, dirección y horario (fuente MINSAL) |
+| Farmacias de turno | "¿qué farmacia hay de turno hoy en Traiguén?" | Lista de turno para la comuna y día correspondiente |
+| Por dirección | "farmacia en O’Higgins 779, Traiguén" | Local(es) matcheando tokens de dirección |
+| Medicamentos (by_name) | "efectos adversos del ibuprofeno" | Ficha factual (descripción breve + bullets) |
+| Medicamentos (lista por clase) | "¿qué antibióticos existen?" | Lista de nombres (clase: Antibiotic) |
+| Dosis/Prescripción | "¿cada cuánto puedo tomar ibuprofeno?" | Mensaje de política (sin recomendaciones) |
+| Off-topic | "¿me das una receta de lentejas?" | Rechazo fijo de tópico |
+
+---
+
+¿Preguntas o quieres ampliar algo? Puedo añadir ejemplos extra, diagramas o guías específicas.
