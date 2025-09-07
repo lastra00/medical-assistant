@@ -13,6 +13,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 from fastapi.staticfiles import StaticFiles
 import os
+import re
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
@@ -44,7 +45,10 @@ def create_app() -> FastAPI:
     detector_prompt = ChatPromptTemplate.from_template(
         """
         Analiza este mensaje y determina si el usuario se está identificando con su nombre.
-        Devuelve JSON. Ejemplos: "Soy Pablo", "Me llamo Ana", "Hola, aquí Juan otra vez".
+        Devuelve JSON.
+        Considera usuario_identificado=true también si el mensaje es SOLO un nombre propio (una sola palabra),
+        por ejemplo: "Ana", "Paloma", "Juan".
+        Ejemplos válidos: "Soy Pablo", "Me llamo Ana", "Hola, aquí Juan otra vez", "Paloma".
         Mensaje: "{mensaje}"
         """
     )
@@ -208,6 +212,22 @@ def create_app() -> FastAPI:
                 detected_user = det.nombre_usuario
         except Exception:
             detected_user = None
+
+        # Si el mensaje es únicamente una identificación (ej. "Oscar"), confirmamos usuario y NO invocamos el grafo
+        is_single_token_name = False
+        token = msg.strip()
+        if 2 <= len(token) <= 40 and (" " not in token) and re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]+", token):
+            is_single_token_name = True
+
+        if detected_user or is_single_token_name:
+            usuario = (detected_user or token)
+            session_id = f"usuario_{usuario.lower()}"
+            # Respuesta breve de confirmación; evitamos pasar este mensaje al grafo (no es contenido de consulta)
+            texto = (
+                f"¡Gracias, {usuario}! Ya te identifiqué. "
+                "¿Qué necesitas sobre farmacias o medicamentos?"
+            )
+            return {"text": texto, "usuario_actual": usuario, "session_id": session_id}
 
         usuario = detected_user or (req.current_user or None)
 

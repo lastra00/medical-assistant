@@ -116,6 +116,7 @@ def build_graph():
             "- Información factual sobre medicamentos (vademécum: nombre, indicaciones, mecanismo, contraindicaciones, interacciones, advertencias).\n"
             "También considera in_scope=true para saludos/pequeñas cortesías (hola, buenos días, cómo estás).\n"
             "Marca in_scope=false si el mensaje trata de cualquier otro tema (clima, recetas, deportes, tecnología, programación, chistes, trámites, etc.).\n"
+            "Ejemplos off-topic (in_scope=false): '¿cuánto tarda en crecer un pino?', '¿cómo va el clima?', 'hazme un chiste'.\n"
             "Devuelve JSON estricto del esquema."
         )),
         ("human", "{input}")
@@ -240,21 +241,11 @@ def build_graph():
     def guardrails_node(state: MessagesState):
         last_user = _get_last_human(state)
         nz = _normalize(last_user)
-        # 0) Bloqueo por fuera de alcance de tema (complementa guardrails de dosis)
+        # 0) Bloqueo por fuera de alcance de tema usando solo LLM (sin listas heurísticas)
         off_topic_message = (
             "Lo siento, pero no puedo proporcionar información sobre ese tema. "
             "Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte."
         )
-        # Heurística determinística: palabras clave muy fuera de alcance
-        off_topic_markers = {
-            "clima", "tiempo", "receta", "cocina", "cocinar", "deportes", "futbol", "fútbol",
-            "tecnologia", "tecnología", "programacion", "programación", "chiste", "humor", "turismo",
-            "viaje", "pelicula", "película", "series", "musica", "música", "dolar", "dólar",
-            "bitcoin", "cripto", "trafico", "tráfico", "videojuego", "videojuegos", "juego", "juegos",
-            "clases de yoga", "horoscopo", "horóscopo", "astrologia", "astrología"
-        }
-        if any(tok in nz for tok in off_topic_markers):
-            return {"blocked": True, "policy_message": off_topic_message}
         try:
             scope_decision: Dict[str, Any] = in_scope_chain.invoke({"input": last_user})
             if not bool(scope_decision.get("in_scope", False)):
@@ -605,25 +596,21 @@ def build_graph():
 
     def format_final(state: MessagesState):
         # LLM resume respuesta factual y recuerda política. Instrucciones claras para no mezclar listados.
-        # Salvaguarda adicional: si el último mensaje del usuario es off-topic, devolver mensaje fijo.
+        # Salvaguarda adicional: revalidar in_scope con LLM (sin listas heurísticas)
         try:
             last_user_ff = _get_last_human(state)
         except Exception:
             last_user_ff = ""
-        nz_ff = _normalize(last_user_ff)
-        off_topic_markers_ff = {
-            "clima", "tiempo", "receta", "cocina", "cocinar", "deportes", "futbol", "fútbol",
-            "tecnologia", "tecnología", "programacion", "programación", "chiste", "humor", "turismo",
-            "viaje", "pelicula", "película", "series", "musica", "música", "dolar", "dólar",
-            "bitcoin", "cripto", "trafico", "tráfico", "videojuego", "videojuegos", "juego", "juegos",
-            "clases de yoga", "horoscopo", "horóscopo", "astrologia", "astrología"
-        }
-        if any(tok in nz_ff for tok in off_topic_markers_ff):
-            off_topic_message = (
-                "Lo siento, pero no puedo proporcionar información sobre ese tema. "
-                "Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte."
-            )
-            return {"messages": [AIMessage(content=off_topic_message)]}
+        try:
+            scope_decision_ff: Dict[str, Any] = in_scope_chain.invoke({"input": last_user_ff})
+            if not bool(scope_decision_ff.get("in_scope", False)):
+                off_topic_message = (
+                    "Lo siento, pero no puedo proporcionar información sobre ese tema. "
+                    "Sin embargo, si necesitas información sobre farmacias o medicamentos, estaré encantado de ayudarte."
+                )
+                return {"messages": [AIMessage(content=off_topic_message)]}
+        except Exception:
+            pass
         # Si guardrails bloqueó, devolvemos directamente el mensaje de política (sin invocar al LLM de síntesis)
         if state.get("blocked"):
             pm = state.get("policy_message") or (
