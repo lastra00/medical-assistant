@@ -1,5 +1,7 @@
 🩺 Asistente Farmacéutico — Guía Completa y Profunda
 
+Se puede visitar en: `https://medical-assistant-proxy.fly.dev/`
+
 Esta aplicación entrega información de farmacias (generales y de turno) del MINSAL y fichas factuales de medicamentos (desde un vademécum CSV) con búsqueda semántica. Está pensada para que, con conocimientos básicos de programación, LangGraph y front/back, puedas entender y explicar en detalle su funcionamiento.
 
 Importante: el asistente no entrega recomendaciones médicas ni pautas de dosificación. Sólo brinda información factual. Ante dudas de salud, consulta a un profesional.
