@@ -92,7 +92,7 @@ sequenceDiagram
   U->>API: 1) "Hola, soy Ana"
   API-->>U: Confirmación de usuario (sin invocar grafo)
 
-  U->>API: 2) "farmacias en Lebu"
+  U->>API: 2) "que farmacia hay en traiguén?"
   API->>R: Leer historial (usuario_ana)
   API->>G: invoke({messages})
   G->>G: in_scope ✓ → guardrails ✓ → router=farmacias
@@ -101,7 +101,7 @@ sequenceDiagram
   API->>R: Persistir turno
   API-->>U: Lista de farmacias
 
-  U->>API: 3) "¿y de turno hoy?"
+  U->>API: 3) "Que farmacia hay de turno en traiguén?"
   API->>R: Leer historial
   API->>G: invoke
   G->>G: router=turnos (hoy→día actual)
@@ -125,7 +125,7 @@ sequenceDiagram
   G-->>API: policy_message
   API-->>U: Mensaje de política (sin dosis)
 
-  U->>API: 6) "farmacias en Traiguén por O’Higgins 779"
+  U->>API: 6) "farmacias en Traiguén por Santa Cruz N° 902?"
   API->>G: invoke
   G->>G: router=farmacias + address_mode
   G->>T: getLocales → filtro por comuna + tokens dirección
