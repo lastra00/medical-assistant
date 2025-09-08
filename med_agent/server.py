@@ -44,15 +44,73 @@ def create_app() -> FastAPI:
     detector_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(DeteccionUsuario)
     detector_prompt = ChatPromptTemplate.from_template(
         """
-        Analiza este mensaje y determina si el usuario se está identificando con su nombre.
-        Devuelve JSON.
-        Considera usuario_identificado=true también si el mensaje es SOLO un nombre propio (una sola palabra),
-        por ejemplo: "Ana", "Paloma", "Juan".
-        Ejemplos válidos: "Soy Pablo", "Me llamo Ana", "Hola, aquí Juan otra vez", "Paloma".
+        Analiza el mensaje y decide si el usuario SE ESTÁ IDENTIFICANDO con su nombre.
+        Devuelve JSON con:
+          - usuario_identificado: true|false
+          - nombre_usuario: string o null
+          - tipo_identificacion: presentacion|referencia|ninguna
+
+        Reglas estrictas (no adivines):
+        - Marca true solo si el mensaje contiene una presentación explícita ("soy X", "me llamo X", "mi nombre es X", "aquí X")
+          o si el mensaje consiste ÚNICAMENTE en un nombre probable: uno o dos tokens (nombre o nombre y apellido).
+        - Si el texto es un saludo u otra frase sin auto-identificación ("hola", "buenas", "¿cómo estás?", etc.), devuelve false.
+        - No aceptes palabras comunes como nombres (hola, buenas, gracias, ayuda, consulta, hey, hi, hello, ok, listo, porfa, etc.).
+        - Si hay dudas, devuelve false.
+
+        Ejemplos válidos → true:
+        - "Soy Pablo" → "Pablo"
+        - "Me llamo Ana" → "Ana"
+        - "Hola, acá Juan" → "Juan"
+        - "Pablo" → "Pablo"
+        - "Pablo Lastra" → "Pablo Lastra"
+
+        Ejemplos inválidos → false:
+        - "hola"
+        - "buenas tardes"
+        - "quiero una farmacia"
+        - "ok"
+        - "gracias"
+
         Mensaje: "{mensaje}"
         """
     )
     detector_chain = detector_prompt | detector_llm
+
+    # Heurística local adicional (defensiva) para aceptar SOLO nombres plausibles
+    _STOP_SINGLE_TOKENS = {
+        # saludos / relleno
+        "hola", "holi", "holaa", "buenas", "buenos", "dias", "días", "tardes", "noches", "saludos",
+        "hello", "hi", "hey", "buenas!", "buenas," , "buen día", "que", "qué", "tal",
+        # otros términos comunes
+        "gracias", "ayuda", "consulta", "ok", "vale", "listo", "si", "sí", "no", "menu", "menú",
+        "start", "inicio", "comenzar", "help", "thanks", "porfa",
+    }
+
+    def _is_name_like_token(tok: str) -> bool:
+        t = tok.strip()
+        if not (2 <= len(t) <= 40):
+            return False
+        # solo letras/guiones/apóstrofes (con acentos)
+        if not re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", t):
+            return False
+        if t.lower() in _STOP_SINGLE_TOKENS:
+            return False
+        return True
+
+    def _is_valid_name_string(s: str) -> bool:
+        # Aceptar 1 o 2 tokens nombre-like
+        toks = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", s.strip())
+        if not (1 <= len(toks) <= 2):
+            return False
+        return all(_is_name_like_token(t) for t in toks)
+
+    def _heuristic_only_name(msg: str) -> Optional[str]:
+        toks = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", msg.strip())
+        if 1 <= len(toks) <= 2 and all(_is_name_like_token(t) for t in toks):
+            # Normalizar capitalización amable (sin cambiar acentos)
+            pretty = " ".join(t.capitalize() for t in toks)
+            return pretty
+        return None
 
     class SessionConfig(BaseModel):
         session_id: str = Field(default="anon", description="ID de sesión para historial en Redis")
@@ -209,18 +267,17 @@ def create_app() -> FastAPI:
         try:
             det = detector_chain.invoke({"mensaje": msg})
             if det.usuario_identificado and det.nombre_usuario:
-                detected_user = det.nombre_usuario
+                # Validar salida del LLM con heurística local (defensiva)
+                if _is_valid_name_string(det.nombre_usuario):
+                    detected_user = det.nombre_usuario
         except Exception:
             detected_user = None
 
-        # Si el mensaje es únicamente una identificación (ej. "Oscar"), confirmamos usuario y NO invocamos el grafo
-        is_single_token_name = False
-        token = msg.strip()
-        if 2 <= len(token) <= 40 and (" " not in token) and re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]+", token):
-            is_single_token_name = True
+        # Heurística: aceptar si el MENSAJE es únicamente un nombre (1 o 2 tokens) válido
+        heuristic_user = _heuristic_only_name(msg)
 
-        if detected_user or is_single_token_name:
-            usuario = (detected_user or token)
+        if detected_user or heuristic_user:
+            usuario = (detected_user or heuristic_user)  # preferimos lo detectado por LLM, si pasó validación
             session_id = f"usuario_{usuario.lower()}"
             # Respuesta breve de confirmación; evitamos pasar este mensaje al grafo (no es contenido de consulta)
             texto = (
@@ -235,7 +292,7 @@ def create_app() -> FastAPI:
         if not usuario:
             texto = (
                 "¡Hola! Soy tu asistente informativo sobre farmacias en Chile y sobre medicamentos del vademécum. "
-                "Para poder recordar nuestras conversaciones, dime tu nombre. Ejemplos: 'Soy María' o 'Me llamo Juan'."
+                "Para poder recordar nuestras conversaciones, dime tu nombre o apodo. Ejemplos: 'Soy María' o 'Me llamo Juan'."
             )
             return {"text": texto, "usuario_actual": None, "session_id": "usuario_anon"}
 

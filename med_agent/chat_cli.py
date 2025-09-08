@@ -92,13 +92,32 @@ def main(argv: List[str] | None = None) -> int:
     llm_detector = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(DeteccionUsuario)
     prompt_detector = ChatPromptTemplate.from_template(
         """
-        Analiza este mensaje y determina si el usuario se está identificando con su nombre.
+        Analiza el mensaje y decide si el usuario SE ESTÁ IDENTIFICANDO con su nombre.
+        Devuelve JSON con:
+          - usuario_identificado: true|false
+          - nombre_usuario: string o null
+          - tipo_identificacion: presentacion|referencia|ninguna
 
-        Ejemplos:
-        - "Soy Pablo" → usuario_identificado=True, nombre_usuario="Pablo", tipo="presentacion"
-        - "Hola, acá María" → usuario_identificado=True, nombre_usuario="María", tipo="presentacion"
-        - "Aquí Juan otra vez" → usuario_identificado=True, nombre_usuario="Juan", tipo="referencia"
-        - "¿Cómo estás?" → usuario_identificado=False, nombre_usuario=None, tipo="ninguna"
+        Reglas estrictas (no adivines):
+        - Marca true solo si el mensaje contiene una presentación explícita ("soy X", "me llamo X", "mi nombre es X", "aquí X")
+          o si el mensaje consiste ÚNICAMENTE en un nombre probable: uno o dos tokens (nombre o nombre y apellido).
+        - Si el texto es un saludo u otra frase sin auto-identificación ("hola", "buenas", "¿cómo estás?", etc.), devuelve false.
+        - No aceptes palabras comunes como nombres (hola, buenas, gracias, ayuda, consulta, hey, hi, hello, ok, listo, porfa, etc.).
+        - Si hay dudas, devuelve false.
+
+        Ejemplos válidos → true:
+        - "Soy Pablo" → "Pablo"
+        - "Me llamo Ana" → "Ana"
+        - "Hola, acá Juan" → "Juan"
+        - "Pablo" → "Pablo"
+        - "Pablo Lastra" → "Pablo Lastra"
+
+        Ejemplos inválidos → false:
+        - "hola"
+        - "buenas tardes"
+        - "¿cómo estás?"
+        - "ok"
+        - "gracias"
 
         Mensaje: "{mensaje}"
         """
